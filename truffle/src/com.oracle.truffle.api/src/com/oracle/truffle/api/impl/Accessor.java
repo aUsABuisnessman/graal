@@ -82,6 +82,7 @@ import org.graalvm.polyglot.SandboxPolicy;
 import org.graalvm.polyglot.impl.AbstractPolyglotImpl;
 import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractHostAccess;
 import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractHostLanguageService;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractValueDispatch;
 import org.graalvm.polyglot.impl.AbstractPolyglotImpl.LogHandler;
 import org.graalvm.polyglot.io.FileSystem;
 import org.graalvm.polyglot.io.MessageEndpoint;
@@ -433,7 +434,7 @@ public abstract class Accessor {
 
         public abstract void assertReturnParityLeave(Node probe, Object polyglotEngine);
 
-        public abstract Object toGuestValue(Node node, Object obj, Object languageContext);
+        public abstract Object toGuestValue(Node node, Object obj);
 
         public abstract Object getPolyglotEngine(Object polyglotLanguageInstance);
 
@@ -506,9 +507,9 @@ public abstract class Accessor {
 
         public abstract RuntimeException wrapHostException(Node callNode, Object languageContext, Throwable exception);
 
-        public abstract boolean isHostException(Object polyglotLanguageContext, Throwable exception);
+        public abstract boolean isHostException(Throwable exception);
 
-        public abstract Throwable asHostException(Object polyglotLanguageContext, Throwable exception);
+        public abstract Throwable asHostException(Throwable exception);
 
         public abstract Object getCurrentHostContext();
 
@@ -566,13 +567,13 @@ public abstract class Accessor {
 
         public abstract Set<String> getValidMimeTypes(Object engineObject, String language);
 
-        public abstract Object asHostObject(Object languageContext, Object value);
+        public abstract Object asHostObject(Object value) throws Exception;
 
-        public abstract boolean isHostObject(Object languageContext, Object value);
+        public abstract boolean isHostObject(Object value);
 
-        public abstract boolean isHostFunction(Object languageContext, Object value);
+        public abstract boolean isHostFunction(Object value);
 
-        public abstract boolean isHostSymbol(Object languageContext, Object guestObject);
+        public abstract boolean isHostSymbol(Object guestObject);
 
         public abstract <S> S lookupService(Object polyglotLanguageContext, LanguageInfo language, LanguageInfo accessingLanguage, Class<S> type);
 
@@ -841,6 +842,12 @@ public abstract class Accessor {
         public abstract void forEachLoadedRootNode(Object sharingLayer, Consumer<RootNode> rootNodeUpdater);
 
         public abstract Object getSharingLayer(Object languageInstance);
+
+        public abstract Context getContextAPI(Object polyglotContextImpl);
+
+        public abstract AbstractValueDispatch lookupValueCache(Object polyglotContextImpl, Object value);
+
+        public abstract Object getHostLanguageContext(Object internalContext);
 
     }
 
@@ -1436,6 +1443,35 @@ public abstract class Accessor {
         }
 
         public abstract Thread currentCarrierThread();
+
+        /**
+         * Executes the given {@code action} while the current virtual thread is pinned to its
+         * carrier thread.
+         * <p>
+         * Pinning a virtual thread prevents the scheduler from mounting it on a different carrier
+         * thread for the duration of the {@code action}. This ensures that the carrier thread
+         * remains stable for operations that require thread local affinity or depend on native
+         * thread identity.
+         * <p>
+         * If the current thread is not a virtual thread, then no pinning is performed and the
+         * {@code action} is executed normally. In this case the call behaves as a simple
+         * {@code action.get()} invocation without any interaction with the virtual-thread
+         * scheduler.
+         * <p>
+         * Pinning is performed by the native method {@link #runPinned0(Supplier)}, which enters a
+         * region where the virtual-thread scheduler is prevented from unmounting the current
+         * virtual thread from its carrier thread. The virtual thread remains mounted on the same
+         * carrier for the duration of the call, and is unpinned when the native method returns.
+         */
+        public final <T> T runInPinnedVirtualThread(Supplier<T> action) {
+            if (JDKAccessor.isVirtualThread(Thread.currentThread())) {
+                return runPinned0(action);
+            } else {
+                return action.get();
+            }
+        }
+
+        private static native <T> T runPinned0(Supplier<T> action);
 
         private static native void registerJVMTIHook();
 

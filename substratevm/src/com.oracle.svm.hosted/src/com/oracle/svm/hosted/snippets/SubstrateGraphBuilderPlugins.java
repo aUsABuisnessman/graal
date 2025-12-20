@@ -254,7 +254,7 @@ public class SubstrateGraphBuilderPlugins {
                 }
             });
 
-            if (ModuleLayer.boot().findModule("jdk.unsupported").isPresent()) {
+            if (JVMCIReflectionUtil.bootModuleLayer().findModule("jdk.unsupported").isPresent()) {
                 Registration customConstructor = new Registration(plugins, loader.findClassOrFail("sun.reflect.ReflectionFactory"));
                 customConstructor.register(new RequiredInvocationPlugin("newConstructorForSerialization", Receiver.class, Class.class) {
                     @Override
@@ -751,7 +751,7 @@ public class SubstrateGraphBuilderPlugins {
         String fieldName = asConstantObject(b, String.class, fieldNameNode);
         if (type != null && fieldName != null) {
             try {
-                ResolvedJavaField field = JVMCIReflectionUtil.getDeclaredField(type, fieldName);
+                ResolvedJavaField field = JVMCIReflectionUtil.getUniqueDeclaredField(type, fieldName);
                 /*
                  * Register the holder class and the field for reflection. This also registers the
                  * field for unsafe access.
@@ -802,7 +802,7 @@ public class SubstrateGraphBuilderPlugins {
                 ResolvedJavaType type = asConstantType(b, classNode);
                 String fieldName = asConstantObject(b, String.class, nameNode);
                 if (type != null && fieldName != null) {
-                    ResolvedJavaField targetField = JVMCIReflectionUtil.getDeclaredField(false, type, fieldName);
+                    ResolvedJavaField targetField = JVMCIReflectionUtil.getUniqueDeclaredField(false, type, fieldName);
                     if (targetField != null) {
                         return processFieldOffset(b, receiver, false, targetField);
                     }

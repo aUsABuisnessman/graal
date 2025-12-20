@@ -33,7 +33,6 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -56,11 +55,24 @@ import com.oracle.svm.hosted.FeatureImpl.BeforeAnalysisAccessImpl;
 
 import jdk.vm.ci.code.BytecodePosition;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
+import org.graalvm.collections.EconomicSet;
 
 @SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Independent.class)
 @AutomaticallyRegisteredFeature
 public class FallbackFeature implements InternalFeature {
     private static final String ABORT_MSG_PREFIX = "Aborting stand-alone image build";
+
+    ///
+    /// Number of internal configuration files which are always present. This is only used for
+    /// deciding whether to use the [FallbackFeature]. See the usages of
+    /// [#adjustLoadedConfigurations]. [FallbackFeature] is scheduled for removal, so this is only a
+    /// temporary workaround (GR-71607).
+    ///
+    /// List of internal configuration files:
+    /// * `com.oracle.svm.features/reachability-metadata.json`
+    ///
+    private static final List<String> INTERNAL_CONFIGURATION_FILES = List.of(
+                    "com.oracle.svm.features/reachability-metadata.json");
 
     private final List<ReflectionInvocationCheck> reflectionInvocationChecks = new ArrayList<>();
 
@@ -101,7 +113,7 @@ public class FallbackFeature implements InternalFeature {
         }
     }
 
-    private final Set<AutoProxyInvoke> autoProxyInvokes = new HashSet<>();
+    private final EconomicSet<AutoProxyInvoke> autoProxyInvokes = EconomicSet.create();
 
     public void addAutoProxyInvoke(ResolvedJavaMethod method, int bci) {
         autoProxyInvokes.add(new AutoProxyInvoke(method, bci));
@@ -340,5 +352,9 @@ public class FallbackFeature implements InternalFeature {
             serializationCalls.add(ABORT_MSG_PREFIX + " due to serialization use without configuration.");
             serializationFallback = new FallbackImageRequest(serializationCalls);
         }
+    }
+
+    public static int adjustLoadedConfigurations(List<String> originalLoadedConfigurations) {
+        return Math.toIntExact(originalLoadedConfigurations.stream().filter(actualConfigFile -> INTERNAL_CONFIGURATION_FILES.stream().noneMatch(actualConfigFile::endsWith)).count());
     }
 }

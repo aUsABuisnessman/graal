@@ -586,7 +586,7 @@ public abstract class HostedType extends HostedElement implements SharedType, Wr
 
     @Override
     public List<? extends ResolvedJavaRecordComponent> getRecordComponents() {
-        throw VMError.intentionallyUnimplemented(); // ExcludeFromJacocoGeneratedReport
+        return wrapped.getRecordComponents();
     }
 
     @Override
@@ -643,12 +643,6 @@ public abstract class HostedType extends HostedElement implements SharedType, Wr
     @Override
     public boolean isCloneableWithAllocation() {
         return wrapped.isCloneableWithAllocation();
-    }
-
-    @SuppressWarnings("deprecation")
-    @Override
-    public ResolvedJavaType getHostClass() {
-        return universe.lookup(wrapped.getHostClass());
     }
 
     @Override

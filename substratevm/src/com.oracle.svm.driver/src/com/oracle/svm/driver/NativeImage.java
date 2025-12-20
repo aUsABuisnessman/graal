@@ -90,6 +90,7 @@ import com.oracle.svm.core.SharedConstants;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateUtil;
 import com.oracle.svm.core.VM;
+import com.oracle.svm.core.imagelayer.LayeredImageOptions;
 import com.oracle.svm.core.option.BundleMember;
 import com.oracle.svm.core.option.OptionOrigin;
 import com.oracle.svm.core.option.OptionUtils;
@@ -283,7 +284,7 @@ public class NativeImage {
     final String oHUseLibC = oH(SubstrateOptions.UseLibC);
     final String oHEnableStaticExecutable = oHEnabled(SubstrateOptions.StaticExecutable);
     final String oHEnableSharedLibraryFlagPrefix = oHEnabled + SubstrateOptions.SharedLibrary.getName();
-    final String oHEnableImageLayerFlagPrefix = oH + SubstrateOptions.LayerCreate.getName();
+    final String oHEnableImageLayerFlagPrefix = oH + LayeredImageOptions.LayerCreate.getName();
     final String oHColor = oH(SubstrateOptions.Color);
     final String oHEnableBuildOutputProgress = oHEnabledByDriver(SubstrateOptions.BuildOutputProgress);
     final String oHEnableBuildOutputLinks = oHEnabledByDriver(SubstrateOptions.BuildOutputLinks);
@@ -297,7 +298,7 @@ public class NativeImage {
 
     final String oHInspectServerContentPath = oH(PointstoOptions.InspectServerContentPath);
     final String oHDeadlockWatchdogInterval = oH(SubstrateOptions.DeadlockWatchdogInterval);
-    final String oHLayerCreate = oH(SubstrateOptions.LayerCreate);
+    final String oHLayerCreate = oH(LayeredImageOptions.LayerCreate);
 
     final Map<String, String> imageBuilderEnvironment = new HashMap<>();
     private final ArrayList<String> imageBuilderArgs = new ArrayList<>();
@@ -499,13 +500,6 @@ public class NativeImage {
                 return inspectPath;
             }
             return null;
-        }
-
-        /**
-         * @return base image classpath needed for every image (e.g. LIBRARY_SUPPORT)
-         */
-        public List<Path> getImageProvidedClasspath() {
-            return getImageProvidedJars();
         }
 
         /**
@@ -1419,7 +1413,9 @@ public class NativeImage {
         LinkedHashSet<Path> finalImageClasspath = new LinkedHashSet<>(imageClasspath);
 
         LinkedHashSet<Path> finalImageProvidedJars = new LinkedHashSet<>(this.imageProvidedJars);
-        finalImageProvidedJars.addAll(config.getImageProvidedModulePath());
+        if (!finalImageModulePath.isEmpty() || !finalImageClasspath.isEmpty()) {
+            finalImageProvidedJars.addAll(config.getImageProvidedModulePath());
+        }
         finalImageModulePath.addAll(finalImageProvidedJars);
         finalImageProvidedJars.forEach(this::processClasspathNativeImageMetaInf);
         imageBuilderJavaArgs.add("-D" + SharedConstants.IMAGE_PROVIDED_JARS_ENV_VARIABLE + "=" + String.join(File.pathSeparator, finalImageProvidedJars.stream().map(Path::toString).toList()));
@@ -1920,17 +1916,15 @@ public class NativeImage {
     }
 
     private Set<String> getImplicitlyRequiredSystemModules(Collection<Path> modulePath) {
-        if (modulePath.isEmpty()) {
-            return Set.of();
+        ModuleFinder finder = ModuleFinder.ofSystem();
+        if (!modulePath.isEmpty()) {
+            ModuleFinder appModuleFinder = ModuleFinder.of(modulePath.toArray(Path[]::new));
+            finder = ModuleFinder.compose(appModuleFinder, finder);
         }
-
-        ModuleFinder systemModuleFinder = ModuleFinder.ofSystem();
-        ModuleFinder appModuleFinder = ModuleFinder.of(modulePath.toArray(Path[]::new));
-        ModuleFinder finder = ModuleFinder.compose(appModuleFinder, systemModuleFinder);
         Map<String, ModuleReference> modules = finder.findAll().stream()
                         .collect(Collectors.toMap(m -> m.descriptor().name(), m -> m));
 
-        Set<String> applicationModulePathRequiredModules = new HashSet<>();
+        Set<String> applicationModulePathRequiredModules = new HashSet<>(); // noEconomicSet(api)
         Queue<ModuleReference> discoveryQueue = new ArrayDeque<>(modules.values());
 
         while (!discoveryQueue.isEmpty()) {

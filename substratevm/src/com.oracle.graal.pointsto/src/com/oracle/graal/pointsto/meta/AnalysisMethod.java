@@ -27,7 +27,6 @@ package com.oracle.graal.pointsto.meta;
 import static jdk.vm.ci.common.JVMCIError.shouldNotReachHere;
 import static jdk.vm.ci.common.JVMCIError.unimplemented;
 
-import java.lang.annotation.Annotation;
 import java.lang.reflect.Executable;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Type;
@@ -64,10 +63,11 @@ import com.oracle.graal.pointsto.reports.ReportUtils;
 import com.oracle.graal.pointsto.util.AnalysisError;
 import com.oracle.graal.pointsto.util.AtomicUtils;
 import com.oracle.graal.pointsto.util.ConcurrentLightHashSet;
-import com.oracle.svm.common.hosted.layeredimage.LayeredCompilationSupport;
-import com.oracle.svm.common.layeredimage.LayeredCompilationBehavior;
-import com.oracle.svm.common.layeredimage.LayeredCompilationBehavior.Behavior;
 import com.oracle.svm.common.meta.MultiMethod;
+import com.oracle.svm.sdk.staging.hosted.layeredimage.LayeredCompilationSupport;
+import com.oracle.svm.sdk.staging.layeredimage.LayeredCompilationBehavior;
+import com.oracle.svm.sdk.staging.layeredimage.LayeredCompilationBehavior.Behavior;
+import com.oracle.svm.util.AnnotationUtil;
 import com.oracle.svm.util.OriginalMethodProvider;
 
 import jdk.graal.compiler.debug.DebugContext;
@@ -129,10 +129,16 @@ public abstract class AnalysisMethod extends AnalysisElement implements WrappedJ
 
     public final ResolvedJavaMethod wrapped;
 
+    /**
+     * Unique id assigned to each {@link AnalysisMethod}. This id is consistent across layers and
+     * can be used to load or match a method in an extension layer.
+     */
     private final int id;
+    /** True when the current layer built is a shared layer. */
     private final boolean buildingSharedLayer;
-    /** Marks a method loaded from a base layer. */
-    private final boolean isInBaseLayer;
+    /** Marks a method loaded from a shared layer. */
+    private final boolean isInSharedLayer;
+    /** Marks a method analyzed in a prior layer. */
     private final boolean analyzedInPriorLayer;
     private final boolean hasNeverInlineDirective;
     private final ExceptionHandler[] exceptionHandlers;
@@ -228,24 +234,24 @@ public abstract class AnalysisMethod extends AnalysisElement implements WrappedJ
         modifiers = wrapped.getModifiers();
 
         buildingSharedLayer = hostVM.buildingSharedLayer();
-        if (hostVM.buildingExtensionLayer() && declaringClass.isInBaseLayer()) {
+        if (hostVM.buildingExtensionLayer() && declaringClass.isInSharedLayer()) {
             int mid = universe.getImageLayerLoader().lookupHostedMethodInBaseLayer(this);
             if (mid != -1) {
                 /*
-                 * This id is the actual link between the corresponding method from the base layer
+                 * This id is the actual link between the corresponding method from the shared layer
                  * and this new method.
                  */
                 id = mid;
-                isInBaseLayer = true;
+                isInSharedLayer = true;
             } else {
                 id = universe.computeNextMethodId();
-                isInBaseLayer = false;
+                isInSharedLayer = false;
             }
         } else {
             id = universe.computeNextMethodId();
-            isInBaseLayer = false;
+            isInSharedLayer = false;
         }
-        analyzedInPriorLayer = isInBaseLayer && hostVM.analyzedInPriorLayer(this);
+        analyzedInPriorLayer = isInSharedLayer && hostVM.analyzedInPriorLayer(this);
 
         ExceptionHandler[] original = wrapped.getExceptionHandlers();
         exceptionHandlers = new ExceptionHandler[original.length];
@@ -285,11 +291,10 @@ public abstract class AnalysisMethod extends AnalysisElement implements WrappedJ
         this.enableReachableInCurrentLayer = universe.hostVM.enableReachableInCurrentLayer();
         compilationBehavior = LayeredCompilationBehavior.Behavior.DEFAULT;
         if (universe.hostVM.buildingImageLayer()) {
-            var annotationExtractor = universe.getAnnotationExtractor();
-            if (annotationExtractor.hasAnnotation(wrapped, LayeredCompilationBehavior.class)) {
-                LayeredCompilationBehavior behavior = annotationExtractor.extractAnnotation(wrapped, LayeredCompilationBehavior.class);
+            LayeredCompilationBehavior behavior = AnnotationUtil.getAnnotation(wrapped, LayeredCompilationBehavior.class);
+            if (behavior != null) {
                 compilationBehavior = behavior.value();
-                if (compilationBehavior == LayeredCompilationBehavior.Behavior.PINNED_TO_INITIAL_LAYER && universe.hostVM.buildingExtensionLayer() && !isInBaseLayer) {
+                if (compilationBehavior == LayeredCompilationBehavior.Behavior.PINNED_TO_INITIAL_LAYER && universe.hostVM.buildingExtensionLayer() && !isInSharedLayer) {
                     var errorMessage = String.format("User methods with layered compilation behavior %s must be registered via %s in the initial layer",
                                     LayeredCompilationBehavior.Behavior.PINNED_TO_INITIAL_LAYER, LayeredCompilationSupport.class);
                     throw AnalysisError.userError(errorMessage);
@@ -304,7 +309,7 @@ public abstract class AnalysisMethod extends AnalysisElement implements WrappedJ
         wrapped = original.wrapped;
         id = original.id;
         buildingSharedLayer = original.buildingSharedLayer;
-        isInBaseLayer = original.isInBaseLayer;
+        isInSharedLayer = original.isInSharedLayer;
         analyzedInPriorLayer = original.analyzedInPriorLayer;
         declaringClass = original.declaringClass;
         signature = original.signature;
@@ -339,7 +344,7 @@ public abstract class AnalysisMethod extends AnalysisElement implements WrappedJ
     }
 
     private void setNewCompilationBehavior(LayeredCompilationBehavior.Behavior compilationBehavior) {
-        assert (!isInBaseLayer && this.compilationBehavior == LayeredCompilationBehavior.Behavior.DEFAULT) || this.compilationBehavior == compilationBehavior : "The method was already assigned " +
+        assert (!isInSharedLayer && this.compilationBehavior == LayeredCompilationBehavior.Behavior.DEFAULT) || this.compilationBehavior == compilationBehavior : "The method was already assigned " +
                         this.compilationBehavior + ", but trying to assign " + compilationBehavior;
         setCompilationBehavior(compilationBehavior);
     }
@@ -461,7 +466,7 @@ public abstract class AnalysisMethod extends AnalysisElement implements WrappedJ
         Object curr = getParsingReason();
 
         while (curr != null) {
-            if (!(curr instanceof BytecodePosition)) {
+            if (!(curr instanceof BytecodePosition position)) {
                 AnalysisError.guarantee(curr instanceof String, "Parsing reason should be a BytecodePosition or String: %s", curr);
                 trace.add(ReportUtils.rootMethodSentinel((String) curr));
                 break;
@@ -470,7 +475,6 @@ public abstract class AnalysisMethod extends AnalysisElement implements WrappedJ
                 trace.add(ReportUtils.truncatedStackTraceSentinel(this));
                 break;
             }
-            BytecodePosition position = (BytecodePosition) curr;
             AnalysisMethod caller = (AnalysisMethod) position.getMethod();
             trace.add(caller.asStackTraceElement(position.getBCI()));
             curr = caller.getParsingReason();
@@ -482,8 +486,8 @@ public abstract class AnalysisMethod extends AnalysisElement implements WrappedJ
         return id;
     }
 
-    public boolean isInBaseLayer() {
-        return isInBaseLayer;
+    public boolean isInSharedLayer() {
+        return isInSharedLayer;
     }
 
     public boolean analyzedInPriorLayer() {
@@ -886,7 +890,7 @@ public abstract class AnalysisMethod extends AnalysisElement implements WrappedJ
             return includeOurselfs ? Set.of(this) : Set.of();
         }
 
-        Set<AnalysisMethod> result = new HashSet<>(allImplementationsSize + 1);
+        Set<AnalysisMethod> result = new HashSet<>(allImplementationsSize + 1); // noEconomicSet(streaming)
         if (includeOurselfs) {
             result.add(this);
         }
@@ -919,11 +923,6 @@ public abstract class AnalysisMethod extends AnalysisElement implements WrappedJ
     @Override
     public ConstantPool getConstantPool() {
         return getUniverse().lookup(wrapped.getConstantPool(), wrapped.getDeclaringClass());
-    }
-
-    @Override
-    public Annotation[][] getParameterAnnotations() {
-        return wrapped.getParameterAnnotations();
     }
 
     @Override
@@ -1176,7 +1175,7 @@ public abstract class AnalysisMethod extends AnalysisElement implements WrappedJ
 
             if (curState.isUnparsed(stage) || (forceReparse && curState.isStageParsed(stage))) {
                 AnalysisParsedGraph graph;
-                if (isInBaseLayer && getUniverse().getImageLayerLoader().hasAnalysisParsedGraph(this)) {
+                if (isInSharedLayer && getUniverse().getImageLayerLoader().hasAnalysisParsedGraph(this)) {
                     graph = getBaseLayerGraph(bb, curState);
                 } else {
                     graph = createAnalysisParsedGraph(bb, stage, curState, forceReparse);

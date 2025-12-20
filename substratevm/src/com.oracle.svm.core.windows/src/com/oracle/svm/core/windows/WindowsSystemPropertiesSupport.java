@@ -219,6 +219,11 @@ public class WindowsSystemPropertiesSupport extends SystemPropertiesSupport {
         return cachedOsVersion;
     }
 
+    @Override
+    protected String jvmLibName() {
+        return "jvm.dll";
+    }
+
     private void computeOsNameAndVersion() {
         /*
          * Reimplementation of code from java_props_md.c
@@ -403,7 +408,6 @@ class WindowsSystemPropertiesFeature implements InternalFeature {
     @Override
     public void duringSetup(DuringSetupAccess access) {
         ImageSingletons.add(RuntimeSystemPropertiesSupport.class, new WindowsSystemPropertiesSupport());
-        /* GR-42971 - Remove once SystemPropertiesSupport.class ImageSingletons use is gone. */
         ImageSingletons.add(SystemPropertiesSupport.class, (SystemPropertiesSupport) ImageSingletons.lookup(RuntimeSystemPropertiesSupport.class));
     }
 }
