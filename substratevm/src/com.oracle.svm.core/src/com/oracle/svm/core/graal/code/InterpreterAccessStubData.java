@@ -24,16 +24,17 @@
  */
 package com.oracle.svm.core.graal.code;
 
-import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+import static com.oracle.svm.guest.staging.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
 import org.graalvm.word.Pointer;
 
-import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.guest.staging.Uninterruptible;
 
 /* Helper class to set ABI specific data */
 public interface InterpreterAccessStubData {
     String REASON_RAW_POINTER = "raw pointer to object";
 
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     void setSp(Pointer data, int stackSize, Pointer stackBuffer);
 
     @Uninterruptible(reason = REASON_RAW_POINTER, callerMustBe = true)
@@ -70,5 +71,6 @@ public interface InterpreterAccessStubData {
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     void setFpReturn(Pointer data, long fpReturn);
 
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     int allocateStubDataSize();
 }

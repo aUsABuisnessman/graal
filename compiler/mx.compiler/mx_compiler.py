@@ -664,6 +664,9 @@ def compiler_gate_benchmark_runner(tasks, extraVMarguments=None, prefix='', task
     # Renaissance is missing the msvc redistributable on Windows [GR-50132]
     if not mx.is_windows():
         for name in renaissance_suite.benchmarkList(bmSuiteArgs):
+            if name == 'akka-uct':
+                # akka-uct doesn't always shutdown cleanly GR-72720
+                continue
             iterations = renaissance_gate_iterations.get(name, -1)
             with Task(prefix + 'Renaissance:' + name, tasks, tags=GraalTags.benchmarktest, report=task_report_component) as t:
                 if t:
@@ -886,6 +889,11 @@ class GraalUnittestConfig(mx_unittest.MxUnittestConfig):
         # TODO: GR-31197, this should be removed.
         vmArgs.append('-Dpolyglot.engine.DynamicCompilationThresholds=false')
         vmArgs.append('-Dpolyglot.engine.AllowExperimentalOptions=true')
+
+        # Add support for PanamaDisassemblerVisitor
+        vmArgs.append(f"-Dtest.jdk.graal.compiler.disassembler.path={mx_graal_tools.get_hsdis_lib()}")
+        vmArgs.append("--enable-native-access=ALL-UNNAMED")
+
         return (vmArgs, mainClass, mainClassArgs)
 
 

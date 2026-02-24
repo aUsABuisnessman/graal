@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core.genscavenge;
 
-import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+import static com.oracle.svm.guest.staging.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
 import java.util.function.IntUnaryOperator;
 
@@ -39,19 +39,19 @@ import org.graalvm.word.Pointer;
 import org.graalvm.word.PointerBase;
 import org.graalvm.word.SignedWord;
 import org.graalvm.word.UnsignedWord;
+import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.core.AlwaysInline;
 import com.oracle.svm.core.NeverInline;
-import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.guest.staging.Uninterruptible;
 import com.oracle.svm.core.c.struct.PinnedObjectField;
 import com.oracle.svm.core.heap.ObjectVisitor;
 import com.oracle.svm.core.hub.LayoutEncoding;
 import com.oracle.svm.core.identityhashcode.IdentityHashCodeSupport;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.directives.GraalDirectives;
 import jdk.graal.compiler.nodes.NamedLocationIdentity;
-import jdk.graal.compiler.word.Word;
 
 /**
  * The common structure of the chunks of memory which make up the heap. HeapChunks are aggregated

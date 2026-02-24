@@ -56,17 +56,16 @@ import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
 import com.oracle.svm.core.jdk.resources.ResourceURLConnection;
 import com.oracle.svm.core.option.SubstrateOptionsParser;
-import com.oracle.svm.core.traits.BuiltinTraits.AllAccess;
-import com.oracle.svm.core.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.core.traits.BuiltinTraits.SingleLayer;
-import com.oracle.svm.core.traits.SingletonLayeredInstallationKind.Independent;
-import com.oracle.svm.core.traits.SingletonLayeredInstallationKind.InitialLayerOnly;
-import com.oracle.svm.core.traits.SingletonTraits;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.SingleLayer;
+import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind.InitialLayerOnly;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
+import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.util.LogUtils;
-import com.oracle.svm.util.ReflectionUtil;
+import com.oracle.svm.shared.util.ReflectionUtil;
 
-import jdk.graal.compiler.word.Word;
+import org.graalvm.word.impl.Word;
 import sun.net.NetProperties;
 
 @TargetClass(java.net.URL.class)
@@ -138,7 +137,7 @@ final class DefaultProxySelectorSystemProxiesAccessor {
     }
 }
 
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = SingleLayer.class, layeredInstallationKind = Independent.class)
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = SingleLayer.class)
 @AutomaticallyRegisteredFeature
 class JavaNetFeature implements InternalFeature {
 

@@ -86,14 +86,13 @@ import com.oracle.svm.core.option.OptionOrigin;
 import com.oracle.svm.core.option.OptionUtils;
 import com.oracle.svm.core.option.RuntimeOptionKey;
 import com.oracle.svm.core.option.SubstrateOptionsParser;
-import com.oracle.svm.core.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.core.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.core.traits.SingletonLayeredInstallationKind.Independent;
-import com.oracle.svm.core.traits.SingletonTraits;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.core.util.ByteFormattingUtil;
 import com.oracle.svm.core.util.TimeUtils;
 import com.oracle.svm.core.util.UserError;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.hosted.ProgressReporterFeature.UserRecommendation;
 import com.oracle.svm.hosted.ProgressReporterJsonHelper.AnalysisResults;
 import com.oracle.svm.hosted.ProgressReporterJsonHelper.GeneralInfo;
@@ -117,7 +116,7 @@ import jdk.graal.compiler.options.OptionStability;
 import jdk.graal.compiler.options.OptionValues;
 import jdk.graal.compiler.util.json.JsonWriter;
 
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Independent.class)
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class)
 public class ProgressReporter {
     static final int CHARACTERS_PER_LINE;
     private static final String HEADLINE_SEPARATOR;

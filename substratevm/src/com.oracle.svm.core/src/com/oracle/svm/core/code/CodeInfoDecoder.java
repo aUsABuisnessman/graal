@@ -24,9 +24,9 @@
  */
 package com.oracle.svm.core.code;
 
-import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+import static com.oracle.svm.guest.staging.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 import static com.oracle.svm.core.deopt.Deoptimizer.Options.LazyDeoptimization;
-import static com.oracle.svm.core.util.VMError.shouldNotReachHereUnexpectedInput;
+import static com.oracle.svm.shared.util.VMError.shouldNotReachHereUnexpectedInput;
 
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
@@ -35,7 +35,7 @@ import org.graalvm.nativeimage.c.function.CodePointer;
 import org.graalvm.word.Pointer;
 
 import com.oracle.svm.core.AlwaysInline;
-import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.guest.staging.Uninterruptible;
 import com.oracle.svm.core.c.NonmovableArray;
 import com.oracle.svm.core.c.NonmovableArrays;
 import com.oracle.svm.core.c.NonmovableObjectArray;
@@ -46,7 +46,7 @@ import com.oracle.svm.core.jdk.UninterruptibleUtils;
 import com.oracle.svm.core.option.HostedOptionKey;
 import com.oracle.svm.core.util.Counter;
 import com.oracle.svm.core.util.NonmovableByteArrayReader;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.replacements.Fold;
 import jdk.graal.compiler.core.common.util.TypeConversion;
@@ -817,7 +817,7 @@ public final class CodeInfoDecoder {
     /**
      * This limited implementation of {@code FrameInfoDecoder.ValueInfoAllocator} doesn't need to
      * allocate anything at runtime but only supports a limited number of
-     * {@link FrameInfoQueryResult.ValueInfo} objects (20).
+     * {@link FrameInfoQueryResult.ValueInfo} objects.
      * <p>
      * Those objects are re-used so they should not be held onto cross calls to
      * {@link #newValueInfoArray}.
@@ -829,7 +829,6 @@ public final class CodeInfoDecoder {
      * objects).
      */
     public static final class SingleShotValueInfoAllocator implements FrameInfoDecoder.ValueInfoAllocator {
-        private static final int NUM_PREALLOCATED_VALUE_INFO = 20;
         /**
          * The pre-allocated array to be returned by {@code #newValueInfoArray}.
          */
@@ -840,9 +839,8 @@ public final class CodeInfoDecoder {
         private final FrameInfoQueryResult.ValueInfo[] preAllocatedValueInfos;
         private int nextPreAllocatedValueInfo;
 
-        @Platforms(Platform.HOSTED_ONLY.class)
-        public SingleShotValueInfoAllocator() {
-            valueInfos = new FrameInfoQueryResult.ValueInfo[NUM_PREALLOCATED_VALUE_INFO];
+        public SingleShotValueInfoAllocator(int numValueInfos) {
+            valueInfos = new FrameInfoQueryResult.ValueInfo[numValueInfos];
             preAllocatedValueInfos = new FrameInfoQueryResult.ValueInfo[valueInfos.length];
             for (int i = 0; i < preAllocatedValueInfos.length; i++) {
                 preAllocatedValueInfos[i] = new FrameInfoQueryResult.ValueInfo();

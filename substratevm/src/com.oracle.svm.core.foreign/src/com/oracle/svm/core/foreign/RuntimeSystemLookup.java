@@ -44,10 +44,10 @@ import org.graalvm.word.Pointer;
 
 import com.oracle.svm.core.SubstrateUtil;
 import com.oracle.svm.core.util.BasedOnJDKClass;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.util.VMError;
 
-import jdk.graal.compiler.word.Word;
 import jdk.internal.foreign.Utils;
+import org.graalvm.word.impl.Word;
 
 /**
  * Separated from {@link Target_jdk_internal_foreign_SystemLookup} to allow (forced) runtime

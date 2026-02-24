@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core.genscavenge;
 
-import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+import static com.oracle.svm.guest.staging.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 import static com.oracle.svm.core.genscavenge.HeapVerifier.Occasion.After;
 import static com.oracle.svm.core.genscavenge.HeapVerifier.Occasion.Before;
 import static com.oracle.svm.core.genscavenge.HeapVerifier.Occasion.During;
@@ -48,7 +48,7 @@ import com.oracle.svm.core.NeverInline;
 import com.oracle.svm.core.RuntimeAssertionsSupport;
 import com.oracle.svm.core.SubstrateGCOptions;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.guest.staging.Uninterruptible;
 import com.oracle.svm.core.UnmanagedMemoryUtil;
 import com.oracle.svm.core.c.NonmovableArray;
 import com.oracle.svm.core.code.CodeInfo;
@@ -92,6 +92,7 @@ import com.oracle.svm.core.jfr.JfrTicks;
 import com.oracle.svm.core.jfr.events.AllocationRequiringGCEvent;
 import com.oracle.svm.core.log.Log;
 import com.oracle.svm.core.metaspace.Metaspace;
+import com.oracle.svm.core.option.RuntimeOptionKey;
 import com.oracle.svm.core.os.ChunkBasedCommittedMemoryProvider;
 import com.oracle.svm.core.snippets.ImplicitExceptions;
 import com.oracle.svm.core.snippets.KnownIntrinsics;
@@ -106,22 +107,21 @@ import com.oracle.svm.core.thread.PlatformThreads;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.thread.VMThreads;
 import com.oracle.svm.core.threadlocal.VMThreadLocalSupport;
-import com.oracle.svm.core.traits.BuiltinTraits.AllAccess;
-import com.oracle.svm.core.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.core.traits.BuiltinTraits.PartiallyLayerAware;
-import com.oracle.svm.core.traits.SingletonLayeredInstallationKind.Independent;
-import com.oracle.svm.core.traits.SingletonTraits;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.PartiallyLayerAware;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.core.util.TimeUtils;
 import com.oracle.svm.core.util.Timer;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.replacements.Fold;
-import jdk.graal.compiler.word.Word;
+import org.graalvm.word.impl.Word;
 
 /**
  * Garbage collector (incremental or complete) for {@link HeapImpl}.
  */
-@SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Independent.class, other = PartiallyLayerAware.class)
+@SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, other = PartiallyLayerAware.class)
 public final class GCImpl implements GC {
     private static final long K = 1024;
     static final long M = K * K;
@@ -413,12 +413,20 @@ public final class GCImpl implements GC {
     }
 
     private static boolean shouldVerify(HeapVerifier.Occasion occasion) {
-        return switch (occasion) {
-            case Before -> SerialGCOptions.VerifyBeforeGC.getValue();
-            case During -> SerialGCOptions.VerifyDuringGC.getValue();
-            case After -> SerialGCOptions.VerifyAfterGC.getValue();
+        RuntimeOptionKey<Boolean> key = switch (occasion) {
+            case Before -> SubstrateGCOptions.ConcealedOptions.VerifyBeforeGC;
+            case During -> SubstrateGCOptions.ConcealedOptions.VerifyDuringGC;
+            case After -> SubstrateGCOptions.ConcealedOptions.VerifyAfterGC;
             default -> throw VMError.shouldNotReachHere("Unexpected heap verification occasion.");
         };
+
+        assert SubstrateGCOptions.VerifyHeap.getValue();
+        Boolean value = key.getValue();
+        if (value == null) {
+            /* The option doesn't have a value but VerifyHeap is enabled, so default to true. */
+            return true;
+        }
+        return key.getValue();
     }
 
     private String getGCKind() {

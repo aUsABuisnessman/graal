@@ -60,14 +60,13 @@ import com.oracle.svm.core.option.HostedOptionKey;
 import com.oracle.svm.core.option.RuntimeOptionKey;
 import com.oracle.svm.core.option.SubstrateOptionsParser;
 import com.oracle.svm.core.thread.VMOperation;
-import com.oracle.svm.core.traits.BuiltinTraits.AllAccess;
-import com.oracle.svm.core.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.core.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.core.traits.BuiltinTraits.SingleLayer;
-import com.oracle.svm.core.traits.SingletonLayeredInstallationKind.Disallowed;
-import com.oracle.svm.core.traits.SingletonLayeredInstallationKind.Independent;
-import com.oracle.svm.core.traits.SingletonTraits;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.Disallowed;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.SingleLayer;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
+import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.options.Option;
 import jdk.graal.compiler.options.OptionStability;
@@ -78,7 +77,7 @@ import jdk.graal.compiler.options.OptionStability;
  * reachability metadata, and then the run-time option {@link Options#TraceMetadata} enables
  * tracing.
  */
-@SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Disallowed.class)
+@SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
 public final class MetadataTracer {
 
     public static class Options {
@@ -634,7 +633,7 @@ record TraceOptions(Path path, boolean merge, Path debugLog) {
 }
 
 @AutomaticallyRegisteredFeature
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = SingleLayer.class, layeredInstallationKind = Independent.class)
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = SingleLayer.class)
 class MetadataTracerFeature implements InternalFeature {
     @Override
     public boolean isInConfiguration(IsInConfigurationAccess access) {
@@ -648,7 +647,7 @@ class MetadataTracerFeature implements InternalFeature {
 
     @Override
     public void duringSetup(DuringSetupAccess access) {
-        /* GR-70850: Unconditionally include the hooks within the initial layer. */
+        /* GR-72843: Unconditionally include the hooks within the initial layer. */
         if (MetadataTracer.Options.MetadataTracingSupport.getValue()) {
             ImageSingletons.add(MetadataTracer.class, new MetadataTracer());
             RuntimeSupport.getRuntimeSupport().addInitializationHook(MetadataTracer.initializeMetadataTracingHook());

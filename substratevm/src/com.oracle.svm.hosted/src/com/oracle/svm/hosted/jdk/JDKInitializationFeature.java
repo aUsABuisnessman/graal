@@ -37,14 +37,13 @@ import com.oracle.svm.core.ParsingReason;
 import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.jdk.ProtectionDomainSupport;
-import com.oracle.svm.core.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.core.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.core.traits.SingletonLayeredInstallationKind.Independent;
-import com.oracle.svm.core.traits.SingletonTraits;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.hosted.FeatureImpl;
 import com.oracle.svm.hosted.FeatureImpl.AfterRegistrationAccessImpl;
 import com.oracle.svm.hosted.ImageClassLoader;
-import com.oracle.svm.util.ReflectionUtil;
+import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.util.TypeResult;
 
 import jdk.graal.compiler.nodes.ValueNode;
@@ -58,7 +57,7 @@ import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Independent.class)
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class)
 @AutomaticallyRegisteredFeature
 public class JDKInitializationFeature implements InternalFeature {
     private static final String JDK_CLASS_REASON = "Core JDK classes are initialized at build time";

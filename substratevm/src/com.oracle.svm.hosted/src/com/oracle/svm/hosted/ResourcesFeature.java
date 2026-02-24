@@ -89,7 +89,6 @@ import com.oracle.svm.core.option.HostedOptionKey;
 import com.oracle.svm.core.option.HostedOptionValues;
 import com.oracle.svm.core.option.OptionMigrationMessage;
 import com.oracle.svm.core.util.UserError;
-import com.oracle.svm.core.util.VMError;
 import com.oracle.svm.hosted.classinitialization.ClassInitializationSupport;
 import com.oracle.svm.hosted.config.ConfigurationParserUtils;
 import com.oracle.svm.hosted.dynamicaccessinference.DynamicAccessInferenceLog;
@@ -99,11 +98,12 @@ import com.oracle.svm.hosted.jdk.localization.LocalizationFeature;
 import com.oracle.svm.hosted.reflect.NativeImageConditionResolver;
 import com.oracle.svm.hosted.snippets.SubstrateGraphBuilderPlugins;
 import com.oracle.svm.hosted.util.ResourcesUtils;
+import com.oracle.svm.shared.util.ModuleSupport;
+import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.util.GlobUtils;
 import com.oracle.svm.util.LogUtils;
-import com.oracle.svm.util.ModuleSupport;
 import com.oracle.svm.util.NativeImageResourcePathRepresentation;
-import com.oracle.svm.util.ReflectionUtil;
+import com.oracle.svm.shared.util.ReflectionUtil;
 
 import jdk.graal.compiler.nodes.ValueNode;
 import jdk.graal.compiler.nodes.graphbuilderconf.GraphBuilderConfiguration;
@@ -175,7 +175,6 @@ public class ResourcesFeature implements InternalFeature {
     private Set<ConditionalPattern> globWorkSet = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Set<ConditionalPattern> excludedResourcePatterns = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
-    private int loadedConfigurations;
     private ImageClassLoader imageClassLoader;
 
     private DynamicAccessInferenceLog inferenceLog;
@@ -420,14 +419,13 @@ public class ResourcesFeature implements InternalFeature {
 
         ResourceConfigurationParser<AccessCondition> parser = ResourceConfigurationParser.create(true, conditionResolver, ResourcesRegistry.singleton(),
                         ConfigurationFiles.Options.getConfigurationParserOptions());
-        List<String> originalLoadedConfigurations = ConfigurationParserUtils.parseAndRegisterConfigurationsFromCombinedFile(parser, imageClassLoader, "resource");
+        ConfigurationParserUtils.parseAndRegisterConfigurationsFromCombinedFile(parser, imageClassLoader, "resource");
 
         ResourceConfigurationParser<AccessCondition> legacyParser = ResourceConfigurationParser.create(false, conditionResolver, ResourcesRegistry.singleton(),
                         ConfigurationFiles.Options.getConfigurationParserOptions());
-        originalLoadedConfigurations.addAll(ConfigurationParserUtils.parseAndRegisterConfigurations(legacyParser, imageClassLoader, "resource",
+        ConfigurationParserUtils.parseAndRegisterConfigurations(legacyParser, imageClassLoader, "resource",
                         ConfigurationFiles.Options.ResourceConfigurationFiles, ConfigurationFiles.Options.ResourceConfigurationResources,
-                        ConfigurationFile.RESOURCES.getFileName()));
-        loadedConfigurations = FallbackFeature.adjustLoadedConfigurations(originalLoadedConfigurations);
+                        ConfigurationFile.RESOURCES.getFileName());
 
         /* prepare globs for resource registration */
         List<CompressedGlobTrie.GlobWithInfo<ConditionWithOrigin>> patternsWithInfo = globWorkSet
@@ -660,7 +658,7 @@ public class ResourcesFeature implements InternalFeature {
 
     @Override
     public void afterAnalysis(AfterAnalysisAccess access) {
-        resourcesRegistry.sealed();
+        resourcesRegistry.seal();
         if (Options.GenerateEmbeddedResourcesFile.getValue()) {
             Path reportLocation = NativeImageGenerator.generatedFiles(HostedOptionValues.singleton()).resolve(Options.EMBEDDED_RESOURCES_FILE_NAME);
             try (JsonWriter writer = new JsonWriter(reportLocation)) {
@@ -676,17 +674,6 @@ public class ResourcesFeature implements InternalFeature {
         GlobTrieNode<ConditionWithOrigin> root = Resources.currentLayer().getResourcesTrieRoot();
         CompressedGlobTrie.removeNodes(root, (conditionWithOrigin) -> !access.isReachable(((TypeReachabilityCondition) conditionWithOrigin.condition()).getType()));
         CompressedGlobTrie.finalize(root);
-    }
-
-    @Override
-    public void beforeCompilation(BeforeCompilationAccess access) {
-        if (!ImageSingletons.contains(FallbackFeature.class)) {
-            return;
-        }
-        FallbackFeature.FallbackImageRequest resourceFallback = ImageSingletons.lookup(FallbackFeature.class).resourceFallback;
-        if (resourceFallback != null && Options.IncludeResources.getValue().values().isEmpty() && loadedConfigurations == 0) {
-            throw resourceFallback;
-        }
     }
 
     @Override

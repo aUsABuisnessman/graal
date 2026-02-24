@@ -42,7 +42,6 @@ package com.oracle.truffle.dsl.processor.bytecode.generator;
 
 import static com.oracle.truffle.dsl.processor.bytecode.generator.ElementHelpers.arrayOf;
 import static com.oracle.truffle.dsl.processor.generator.GeneratorUtils.createNeverPartOfCompilation;
-import static com.oracle.truffle.dsl.processor.java.ElementUtils.firstLetterUpperCase;
 import static javax.lang.model.element.Modifier.ABSTRACT;
 import static javax.lang.model.element.Modifier.FINAL;
 import static javax.lang.model.element.Modifier.PRIVATE;
@@ -56,13 +55,13 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
+import javax.lang.model.element.Modifier;
 import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.ArrayType;
 import javax.lang.model.type.DeclaredType;
@@ -70,13 +69,13 @@ import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.ElementFilter;
 
 import com.oracle.truffle.dsl.processor.bytecode.generator.BytecodeRootNodeElement.InstructionGroup;
-import com.oracle.truffle.dsl.processor.bytecode.model.ConstantOperandModel;
+import com.oracle.truffle.dsl.processor.bytecode.model.BytecodeDSLModel;
+import com.oracle.truffle.dsl.processor.bytecode.model.BytecodeDSLModel.LoadIllegalLocalStrategy;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.ImmediateKind;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.InstructionImmediate;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.InstructionKind;
 import com.oracle.truffle.dsl.processor.bytecode.model.OperationModel.OperationKind;
-import com.oracle.truffle.dsl.processor.bytecode.model.ShortCircuitInstructionModel;
 import com.oracle.truffle.dsl.processor.generator.GeneratorUtils;
 import com.oracle.truffle.dsl.processor.java.ElementUtils;
 import com.oracle.truffle.dsl.processor.java.model.CodeAnnotationMirror;
@@ -87,14 +86,13 @@ import com.oracle.truffle.dsl.processor.java.model.CodeTree;
 import com.oracle.truffle.dsl.processor.java.model.CodeTreeBuilder;
 import com.oracle.truffle.dsl.processor.java.model.CodeTypeMirror.ArrayCodeTypeMirror;
 import com.oracle.truffle.dsl.processor.java.model.CodeVariableElement;
-import com.oracle.truffle.dsl.processor.model.SpecializationData;
 
 final class BytecodeNodeElement extends AbstractElement {
 
     private static final String METADATA_FIELD_NAME = "osrMetadata_";
-    private static final String FORCE_UNCACHED_THRESHOLD = "Integer.MIN_VALUE";
-    private final Map<InstructionModel, CodeExecutableElement> instructionHandlers = new LinkedHashMap<>();
-    private final InterpreterTier tier;
+    static final String FORCE_UNCACHED_THRESHOLD = "Integer.MIN_VALUE";
+    final InterpreterTier tier;
+    final Map<InstructionModel, CodeExecutableElement> instructionSlowPaths = new LinkedHashMap<>();
 
     BytecodeNodeElement(BytecodeRootNodeElement parent, InterpreterTier tier) {
         super(parent, Set.of(PRIVATE, STATIC, FINAL), ElementKind.CLASS, null, tier.bytecodeClassName());
@@ -353,7 +351,7 @@ final class BytecodeNodeElement extends AbstractElement {
             b.startCase().staticReference(parent.frameTagsElement.getIllegal()).end();
             b.startCaseBlock();
             b.startReturn();
-            if (parent.model.defaultLocalValueExpression != null) {
+            if (parent.model.loadIllegalLocalStrategy == LoadIllegalLocalStrategy.DEFAULT_VALUE) {
                 b.string("DEFAULT_LOCAL_VALUE");
             } else {
                 b.string("null");
@@ -487,6 +485,12 @@ final class BytecodeNodeElement extends AbstractElement {
                         new String[]{"frame", "localOffset", "localIndex", "value"},
                         new TypeMirror[]{types.Frame, type(int.class), type(int.class), specializedType});
         CodeTreeBuilder b = ex.createBuilder();
+
+        if (parent.model.localAccessorsUsed.isEmpty()) {
+            BytecodeRootNodeElement.emitThrowIllegalStateException(ex, b, "method should not be reached");
+            return ex;
+        }
+
         AbstractBytecodeNodeElement.buildVerifyFrameDescriptor(b, true);
         if (tier.isCached()) {
             b.declaration(type(int.class), "frameIndex", "USER_LOCALS_START_INDEX + localOffset");
@@ -578,11 +582,27 @@ final class BytecodeNodeElement extends AbstractElement {
         ex.getModifiers().add(FINAL);
 
         CodeTreeBuilder b = ex.createBuilder();
+
+        if (parent.model.localAccessorsUsed.isEmpty()) {
+            BytecodeRootNodeElement.emitThrowIllegalStateException(ex, b, "method should not be reached");
+            return ex;
+        }
+
         AbstractBytecodeNodeElement.buildVerifyFrameDescriptor(b, true);
+
+        b.declaration(type(int.class), "frameIndex", "USER_LOCALS_START_INDEX + localOffset");
+        if (parent.model.loadIllegalLocalStrategy == LoadIllegalLocalStrategy.CUSTOM_EXCEPTION) {
+            b.startIf();
+            b.startCall("frame", "getTag").string("frameIndex").end();
+            b.string(" == ");
+            b.staticReference(parent.frameTagsElement.getIllegal());
+            b.end().startBlock();
+            emitThrowIllegalLocalException(parent.model, b, null, CodeTreeBuilder.singleString("this"), CodeTreeBuilder.singleString("localIndex"), true);
+            b.end();
+        }
 
         if (tier.isCached()) {
             if (generic) {
-                b.declaration(type(int.class), "frameIndex", "USER_LOCALS_START_INDEX + localOffset");
                 b.startTryBlock();
                 b.startDeclaration(type(byte.class), "tag").startCall("getCachedLocalTag");
                 b.string("localIndex");
@@ -608,7 +628,7 @@ final class BytecodeNodeElement extends AbstractElement {
 
                 b.startCase().staticReference(parent.frameTagsElement.getIllegal()).end();
                 b.startCaseBlock();
-                if (parent.model.defaultLocalValueExpression != null) {
+                if (parent.model.loadIllegalLocalStrategy == LoadIllegalLocalStrategy.DEFAULT_VALUE) {
                     b.startReturn();
                     b.string("DEFAULT_LOCAL_VALUE");
                     b.end();
@@ -628,14 +648,14 @@ final class BytecodeNodeElement extends AbstractElement {
                 b.end(); // catch
             } else {
                 b.startReturn();
-                BytecodeRootNodeElement.startExpectFrame(b, "frame", specializedType, false).string("USER_LOCALS_START_INDEX + localOffset").end();
+                BytecodeRootNodeElement.startExpectFrame(b, "frame", specializedType, false).string("frameIndex").end();
                 b.end();
             }
         } else {
             if (generic) {
-                b.startReturn().string("frame.getObject(USER_LOCALS_START_INDEX + localOffset)").end();
+                b.startReturn().string("frame.getObject(frameIndex)").end();
             } else {
-                b.declaration(type(Object.class), "value", "frame.getObject(USER_LOCALS_START_INDEX + localOffset)");
+                b.declaration(type(Object.class), "value", "frame.getObject(frameIndex)");
                 b.startIf().string("value instanceof ").type(ElementUtils.boxType(specializedType)).string(" castValue").end().startBlock();
                 b.startReturn().string("castValue").end();
                 b.end();
@@ -782,14 +802,14 @@ final class BytecodeNodeElement extends AbstractElement {
                  */
                 b.declaration(types.Frame, "frame", getFrame);
 
-                if (parent.model.defaultLocalValueExpression == null) {
-                    b.startIf().string("frame.isObject(" + BytecodeRootNodeElement.COROUTINE_FRAME_INDEX + ")").end().end().startBlock();
-                    b.startAssign("frame").cast(types.Frame).string("frame.getObject(" + BytecodeRootNodeElement.COROUTINE_FRAME_INDEX + ")").end();
-                    b.end();
-                } else {
+                if (parent.model.loadIllegalLocalStrategy == LoadIllegalLocalStrategy.DEFAULT_VALUE) {
                     b.declaration(type(Object.class), "coroutineFrame", "frame.getObject(" + BytecodeRootNodeElement.COROUTINE_FRAME_INDEX + ")");
                     b.startIf().string("coroutineFrame != DEFAULT_LOCAL_VALUE").end().end().startBlock();
                     b.startAssign("frame").cast(types.Frame).string("coroutineFrame").end();
+                    b.end();
+                } else {
+                    b.startIf().string("frame.isObject(" + BytecodeRootNodeElement.COROUTINE_FRAME_INDEX + ")").end().end().startBlock();
+                    b.startAssign("frame").cast(types.Frame).string("frame.getObject(" + BytecodeRootNodeElement.COROUTINE_FRAME_INDEX + ")").end();
                     b.end();
                 }
 
@@ -924,7 +944,11 @@ final class BytecodeNodeElement extends AbstractElement {
         switch (tier) {
             case UNCACHED:
             case UNINITIALIZED:
-                b.startReturn();
+                if (parent.model.isBytecodeUpdatable()) {
+                    b.startDeclaration(parent.abstractBytecodeNode.asType(), "cachedNode");
+                } else {
+                    b.startReturn();
+                }
                 b.startNew(InterpreterTier.CACHED.friendlyName + "BytecodeNode");
                 for (VariableElement var : ElementFilter.fieldsIn(parent.abstractBytecodeNode.getEnclosedElements())) {
                     b.string("this.", var.getSimpleName().toString());
@@ -933,7 +957,14 @@ final class BytecodeNodeElement extends AbstractElement {
                     b.string("createCachedTags(numLocals)");
                 }
                 b.end();
-                b.end();
+
+                if (parent.model.isBytecodeUpdatable()) {
+                    b.end();
+                    b.startAssign("cachedNode.oldBytecodesBox").string("this.allocateOldBytecodesBox()").end();
+                    b.startReturn().string("cachedNode").end();
+                } else {
+                    b.end();
+                }
                 break;
             case CACHED:
                 b.startReturn().string("this").end();
@@ -964,6 +995,10 @@ final class BytecodeNodeElement extends AbstractElement {
             String name = var.getSimpleName().toString();
             ex.addParameter(new CodeVariableElement(var.asType(), name));
             b.statement("this.", name, " = ", name);
+        }
+        if (parent.model.isBytecodeUpdatable()) {
+            ex.addParameter(new CodeVariableElement(parent.oldBytecodesBoxElement.asType(), "oldBytecodesBox_"));
+            b.statement("this.oldBytecodesBox = oldBytecodesBox_");
         }
 
         return ex;
@@ -1055,6 +1090,9 @@ final class BytecodeNodeElement extends AbstractElement {
                 }
                 b.string("this.", e.getSimpleName().toString());
             }
+            if (parent.model.isBytecodeUpdatable()) {
+                b.string("this.allocateOldBytecodesBox()");
+            }
             b.end();
             b.end();
 
@@ -1066,6 +1104,10 @@ final class BytecodeNodeElement extends AbstractElement {
             }
             for (VariableElement e : ElementFilter.fieldsIn(this.getEnclosedElements())) {
                 b.string("this.", e.getSimpleName().toString());
+            }
+            if (tier.isUncached() && parent.model.isBytecodeUpdatable()) {
+                // If the bytecode is being reused, allocate the shared box.
+                b.string("bytecodes_ == null ? this.allocateOldBytecodesBox() : null");
             }
             b.end();
             b.end();
@@ -1372,7 +1414,8 @@ final class BytecodeNodeElement extends AbstractElement {
 
             b.startIf().string("uncachedExecuteCount_ <= 1").end().startBlock();
             b.startIf().string("uncachedExecuteCount_ != " + FORCE_UNCACHED_THRESHOLD).end().startBlock();
-            b.statement("$root.transitionToCached(frame, 0)");
+            b.statement("$root.transitionToCached()");
+
             b.startReturn().string("startState").end();
             b.end(2);
             b.startElseBlock();
@@ -1466,7 +1509,7 @@ final class BytecodeNodeElement extends AbstractElement {
                 buildInstructionCases(b, forceCachedInstruction);
             }
             b.startBlock();
-            b.statement("$root.transitionToCached(frame, bci)");
+            b.statement("$root.transitionToCached()");
             b.statement("return ", parent.encodeState("bci", "sp"));
             b.end();
         }
@@ -1505,8 +1548,8 @@ final class BytecodeNodeElement extends AbstractElement {
                 InstructionGroup group = entry.getKey();
                 int groupIndex = entry.getValue();
                 b.startCase().string(groupIndex).end().startCaseBlock();
-                emitCustomStackEffect(b, group.stackEffect());
                 b.statement("bci += " + group.instructionLength());
+                emitCustomStackEffect(b, group.stackEffect());
                 b.statement("break");
                 b.end(); // case block
             }
@@ -1514,6 +1557,10 @@ final class BytecodeNodeElement extends AbstractElement {
             b.statement("break");
             b.end(); // default case block
 
+        } else {
+            b.caseDefault().startCaseBlock();
+            b.tree(GeneratorUtils.createShouldNotReachHere());
+            b.end();
         }
 
         b.end(); // switch
@@ -1595,10 +1642,7 @@ final class BytecodeNodeElement extends AbstractElement {
             }
             buildInstructionCases(b, instruction);
             b.startCaseBlock();
-            b.startStatement();
-            emitCallInstructionHandler(b, instruction, false);
-            b.end();
-
+            emitInstructionCase(b, instruction, CodeTreeBuilder.singleString(String.valueOf(groupIndex)));
             b.startReturn().string(groupIndex).end();
             b.end();
         }
@@ -1622,366 +1666,18 @@ final class BytecodeNodeElement extends AbstractElement {
         return continueAtMethod;
     }
 
-    private void emitInstructionHandler(CodeTreeBuilder b, InstructionModel instr) {
-        CodeExecutableElement method = lookupInstructionHandler(instr, true);
-        if (isReturn(instr)) {
-            b.startReturn();
-            emitCallInstructionHandler(b, instr);
-            b.end();
-            return;
-        }
-        switch (instr.kind) {
-            case CREATE_VARIADIC:
-            case LOAD_VARIADIC:
-                b.startStatement();
-                b.string("sp -= ");
-                emitCallInstructionHandler(b, instr);
-                b.end();
-                b.statement("bci += " + instr.getInstructionLength());
-                break;
-            case CUSTOM_SHORT_CIRCUIT:
-                ShortCircuitInstructionModel shortCircuitInstruction = instr.shortCircuitModel;
-                b.startIf();
-                emitCallInstructionHandler(b, instr);
-                b.end().startBlock();
-                b.startAssign("bci").tree(BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.BYTECODE_INDEX))).end();
-
-                if (shortCircuitInstruction.producesBoolean()) {
-                    // Stack: [..., convertedValue]
-                    // leave convertedValue on the top of stack
-                } else {
-                    // Stack: [..., value, convertedValue]
-                    // pop convertedValue
-                    b.statement("sp -= 1");
-                }
-
-                b.end().startElseBlock();
-                b.statement("bci += " + instr.getInstructionLength());
-
-                if (shortCircuitInstruction.producesBoolean()) {
-                    // Stack: [..., convertedValue]
-                    // clear convertedValue
-                    b.statement("sp -= 1");
-                } else {
-                    // Stack: [..., value, convertedValue]
-                    // clear convertedValue and value
-                    b.statement("sp -= 2");
-                }
-                b.end();
-                break;
-            default:
-                b.startStatement();
-                boolean bciReturn = ElementUtils.typeEquals(type(int.class), method.getReturnType());
-                if (bciReturn) {
-                    b.string("bci = ");
-                } else {
-                    // nothing to do void method
-                }
-                emitCallInstructionHandler(b, instr);
-                b.end();
-
-                if (!bciReturn) {
-                    b.startStatement().string("bci += ").string(instr.getInstructionLength()).end();
-                }
-
-                emitCustomStackEffect(b, instr.getStackEffect());
-                break;
-        }
-        b.statement("break");
-
-    }
-
-    private CodeExecutableElement lookupInstructionHandler(InstructionModel instr, boolean returnBci) {
-        CodeExecutableElement method = instructionHandlers.get(instr);
-        if (method != null) {
-            return method;
-        }
-        String methodName = "handle" + firstLetterUpperCase(instr.getInternalName());
-        method = this.add(new CodeExecutableElement(Set.of(PRIVATE), type(returnBci ? int.class : void.class), methodName));
-
-        method.addParameter(new CodeVariableElement(types.FrameWithoutBoxing, "frame"));
-        if (parent.model.hasYieldOperation()) {
-            method.addParameter(new CodeVariableElement(types.FrameWithoutBoxing, "localFrame"));
-        }
-        method.addParameter(new CodeVariableElement(type(byte[].class), "bc"));
-        method.addParameter(new CodeVariableElement(type(int.class), "bci"));
-        method.addParameter(new CodeVariableElement(type(int.class), "sp"));
-
-        // register early to support recursive use
-        instructionHandlers.put(instr, method);
-
-        CodeTreeBuilder b = method.createBuilder();
-
-        if (instr.kind != InstructionKind.CUSTOM && BytecodeRootNodeElement.isStoreBciBeforeExecute(parent.model, tier, instr)) {
-            storeBciInFrame(b);
-        }
-
-        boolean emitDefaultReturn = returnBci;
-        switch (instr.kind) {
-            case BRANCH:
-                method.addAnnotationMirror(new CodeAnnotationMirror(types.CompilerDirectives_EarlyInline));
-                b.statement("return " + BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.BYTECODE_INDEX)));
-                emitDefaultReturn = false;
-                break;
-            case BRANCH_FALSE:
-                method.addAnnotationMirror(new CodeAnnotationMirror(types.CompilerDirectives_EarlyInline));
-                emitBranchFalseHandler(instr, b);
-                emitDefaultReturn = false;
-                break;
-            case CUSTOM_SHORT_CIRCUIT:
-                method.addAnnotationMirror(new CodeAnnotationMirror(types.CompilerDirectives_EarlyInline));
-                method.setReturnType(type(boolean.class));
-                emitCustomShortCircuitHandler(instr, b);
-                emitDefaultReturn = false;
-                break;
-            case TAG_RESUME:
-                method.addAnnotationMirror(new CodeAnnotationMirror(types.HostCompilerDirectives_InliningCutoff));
-                b.startDeclaration(parent.tagNode.asType(), "tagNode");
-                b.tree(BytecodeRootNodeElement.readTagNode(parent.tagNode.asType(), BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.TAG_NODE))));
-                b.end();
-                b.startStatement().startCall("tagNode.findProbe().onResume").string(parent.localFrame()).end(2);
-                break;
-            case TAG_ENTER:
-                method.addAnnotationMirror(new CodeAnnotationMirror(types.HostCompilerDirectives_InliningCutoff));
-                b.startDeclaration(parent.tagNode.asType(), "tagNode");
-                b.tree(BytecodeRootNodeElement.readTagNode(parent.tagNode.asType(), BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.TAG_NODE))));
-                b.end();
-                b.startStatement().startCall("tagNode.findProbe().onEnter").string(parent.localFrame()).end(2);
-                break;
-            case TAG_YIELD:
-            case TAG_YIELD_NULL:
-                method.addAnnotationMirror(new CodeAnnotationMirror(types.HostCompilerDirectives_InliningCutoff));
-                if (instr.kind == InstructionKind.TAG_YIELD) {
-                    b.startDeclaration(type(Object.class), "returnValue");
-                    BytecodeRootNodeElement.startRequireFrame(b, type(Object.class));
-                    b.string(parent.localFrame());
-                    b.string("sp - 1");
-                    b.end();
-                    b.end(); // declaration
-                }
-                InstructionImmediate imm = instr.getImmediate(ImmediateKind.TAG_NODE);
-                b.startDeclaration(parent.tagNode.asType(), "tagNode");
-                b.tree(BytecodeRootNodeElement.readTagNode(parent.tagNode.asType(), BytecodeRootNodeElement.readImmediate("bc", "bci", imm)));
-                b.end();
-
-                b.startStatement().startCall("tagNode.findProbe().onYield");
-                b.string(parent.localFrame());
-                switch (instr.kind) {
-                    case TAG_YIELD -> b.string("returnValue");
-                    case TAG_YIELD_NULL -> b.string("null");
-                    default -> throw new AssertionError("unexpected tag yield instruction " + instr);
-                }
-                b.end(2);
-                break;
-            case TAG_LEAVE:
-                method.addAnnotationMirror(new CodeAnnotationMirror(types.HostCompilerDirectives_InliningCutoff));
-                if (tier.isUncached() || instr.isQuickening() || !parent.model.usesBoxingElimination()) {
-                    emitTagLeaveHandler(instr, b);
-                } else {
-                    emitTagLeaveAndSpecializeHandler(instr, b);
-                }
-                break;
-            case TAG_LEAVE_VOID:
-                method.addAnnotationMirror(new CodeAnnotationMirror(types.HostCompilerDirectives_InliningCutoff));
-                b.startDeclaration(parent.tagNode.asType(), "tagNode");
-                b.tree(BytecodeRootNodeElement.readTagNode(parent.tagNode.asType(), BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.TAG_NODE))));
-                b.end();
-                b.startStatement().startCall("tagNode.findProbe().onReturnValue");
-                b.string(parent.localFrame());
-                b.string("null");
-                b.end(2);
-                break;
-            case LOAD_ARGUMENT:
-                emitLoadArgumentHandler(instr, b);
-                break;
-            case LOAD_CONSTANT:
-                emitLoadConstantHandler(instr, b);
-                break;
-            case LOAD_NULL:
-                b.statement(BytecodeRootNodeElement.setFrameObject("frame", "sp", "null"));
-                break;
-            case LOAD_EXCEPTION:
-                b.startStatement();
-                BytecodeRootNodeElement.startSetFrame(b, type(Object.class)).string("frame").string("sp");
-                BytecodeRootNodeElement.startGetFrameUnsafe(b, "frame", type(Object.class));
-                b.startGroup().string("getRoot().maxLocals + ").tree(BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.STACK_POINTER))).end();
-                b.end(); // getFrameUnsafe
-                b.end(); // set frame
-                b.end(); // statement
-                break;
-            case POP:
-                emitPopHandler(instr, b);
-                break;
-            case DUP:
-                b.statement(BytecodeRootNodeElement.copyFrameSlot("sp - 1", "sp"));
-                break;
-            case LOAD_LOCAL:
-            case LOAD_LOCAL_MATERIALIZED:
-                emitLoadLocalHandler(instr, b);
-                break;
-            case STORE_LOCAL:
-            case STORE_LOCAL_MATERIALIZED:
-                emitDefaultReturn = false;
-                emitStoreLocalHandler(instr, b);
-                break;
-            case MERGE_CONDITIONAL:
-                emitMergeConditionalHandler(instr, b);
-                break;
-            case THROW:
-                b.statement("throw sneakyThrow((Throwable) " + BytecodeRootNodeElement.uncheckedGetFrameObject("frame", "sp - 1") + ")");
-                emitDefaultReturn = false;
-                break;
-            case CLEAR_LOCAL:
-                String index = BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.FRAME_INDEX)).toString();
-                if (parent.model.defaultLocalValueExpression != null) {
-                    b.statement(BytecodeRootNodeElement.setFrameObject("frame", index, "DEFAULT_LOCAL_VALUE"));
-                } else {
-                    b.statement(BytecodeRootNodeElement.clearFrame("frame", index));
-                }
-                break;
-            case CREATE_VARIADIC:
-                method.getAnnotationMirrors().add(new CodeAnnotationMirror(types.ExplodeLoop));
-                method.setReturnType(type(int.class));
-                emitCreateVariadicHandler(instr, b);
-                emitDefaultReturn = false;
-                break;
-            case LOAD_VARIADIC:
-                method.getAnnotationMirrors().add(new CodeAnnotationMirror(types.ExplodeLoop));
-                method.setReturnType(type(int.class));
-                emitLoadVariadicHandler(instr, b);
-                emitDefaultReturn = false;
-                break;
-            case EMPTY_VARIADIC:
-                b.startStatement();
-                BytecodeRootNodeElement.startSetFrame(b, type(Object.class));
-                b.string("frame");
-                b.string("sp");
-                b.startGroup();
-                b.string("EMPTY_ARRAY");
-                b.end(); // group
-                b.end(); // setFrame
-                b.end(); // statement
-                break;
-            case SPLAT_VARIADIC:
-                method.getAnnotationMirrors().add(new CodeAnnotationMirror(types.ExplodeLoop));
-                emitSplatVariadicHandler(instr, b);
-                // no stack effect
-                break;
-            case CUSTOM:
-                if (tier.isUncached() && instr.operation.customModel.forcesCached()) {
-                    throw new AssertionError("forceCached instructions should be emitted separately");
-                }
-                if (instr.operation.kind == OperationKind.CUSTOM_YIELD) {
-                    emitDefaultReturn = false;
-                    method.addAnnotationMirror(new CodeAnnotationMirror(types.CompilerDirectives_EarlyInline));
-                    method.setReturnType(type(long.class));
-                    if (tier.isCached()) {
-                        method.getParameters().add(new CodeVariableElement(type(int.class), "counter"));
-                    }
-                    emitBeforeReturnProfilingHandler(b);
-                    emitCustomHandler(b, instr);
-                    String returnSp = (instr.signature.dynamicOperandCount == 0) ? "sp" : "sp - " + instr.signature.dynamicOperandCount;
-                    if (parent.model.overridesBytecodeDebugListenerMethod("afterRootExecute")) {
-                        b.startStatement();
-                        b.startCall("getRoot().afterRootExecute");
-                        parent.emitParseInstruction(b, "this", "bci", CodeTreeBuilder.singleString("readValidBytecode(bc, bci)"));
-                        BytecodeRootNodeElement.startGetFrameUnsafe(b, "frame", type(Object.class)).string("(", returnSp, ")");
-                        b.end();
-                        b.string("null");
-                        b.end();
-                        b.end();
-                    }
-                    b.startReturn().string(BytecodeRootNodeElement.encodeReturnState("(" + returnSp + ")")).end();
-                } else {
-                    emitCustomHandler(b, instr);
-                }
-                break;
-            case TRACE_INSTRUCTION:
-                b.startStatement();
-                b.tree(parent.readConstFastPath(CodeTreeBuilder.singleString("Builder.INSTRUCTION_TRACER_CONSTANT_INDEX"), "this.constants", parent.instructionTracerAccessImplElement.asType()));
-                b.startCall(".onInstructionEnter").string("this").string("bci").string(parent.localFrame()).end();
-                b.end(); // statement
-                break;
-            case YIELD:
-                emitDefaultReturn = false;
-                method.addAnnotationMirror(new CodeAnnotationMirror(types.CompilerDirectives_EarlyInline));
-                method.setReturnType(type(long.class));
-                if (tier.isCached()) {
-                    method.getParameters().add(new CodeVariableElement(type(int.class), "counter"));
-                }
-                emitBeforeReturnProfilingHandler(b);
-
-                if (parent.model.overridesBytecodeDebugListenerMethod("afterRootExecute")) {
-                    b.startStatement();
-                    b.startCall("getRoot().afterRootExecute");
-                    parent.emitParseInstruction(b, "this", "bci", CodeTreeBuilder.singleString("readValidBytecode(bc, bci)"));
-                    BytecodeRootNodeElement.startGetFrameUnsafe(b, "frame", type(Object.class)).string("(sp - 1)");
-                    b.end();
-                    b.string("null");
-                    b.end();
-                    b.end();
-                }
-                InstructionImmediate continuationIndex = instr.getImmediate(ImmediateKind.CONSTANT);
-                emitCopyStackToLocalFrameBeforeYield(b, instr);
-
-                b.startDeclaration(parent.continuationRootNodeImpl.asType(), "continuationRootNode");
-                b.tree(parent.readConstFastPath(BytecodeRootNodeElement.readImmediate("bc", "bci", continuationIndex), "this.constants", parent.continuationRootNodeImpl.asType()));
-                b.end();
-
-                b.startDeclaration(types.ContinuationResult, "continuationResult");
-                b.startCall("continuationRootNode.createContinuation");
-                b.string(parent.localFrame());
-                b.string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - 1"));
-                b.end(2);
-
-                b.statement(BytecodeRootNodeElement.setFrameObject("sp - 1", "continuationResult"));
-
-                emitReturnTopOfStack(b);
-                break;
-            case RETURN:
-                emitDefaultReturn = false;
-                method.addAnnotationMirror(new CodeAnnotationMirror(types.CompilerDirectives_EarlyInline));
-                method.setReturnType(type(long.class));
-                if (tier.isCached()) {
-                    method.getParameters().add(new CodeVariableElement(type(int.class), "counter"));
-                }
-                emitBeforeReturnProfilingHandler(b);
-                if (parent.model.overridesBytecodeDebugListenerMethod("afterRootExecute")) {
-                    b.startStatement();
-                    b.startCall("getRoot().afterRootExecute");
-                    parent.emitParseInstruction(b, "this", "bci", CodeTreeBuilder.singleString("readValidBytecode(bc, bci)"));
-                    BytecodeRootNodeElement.startGetFrameUnsafe(b, "frame", type(Object.class)).string("(sp - 1)");
-                    b.end();
-                    b.string("null");
-                    b.end();
-                    b.end();
-                }
-                emitReturnTopOfStack(b);
-                break;
-            case INVALIDATE:
-                emitDefaultReturn = false;
-                method.setReturnType(type(long.class));
-                if (tier.isCached()) {
-                    method.getParameters().add(new CodeVariableElement(type(int.class), "counter"));
-                }
-                emitInvalidate(b);
-                break;
-            default:
-                throw new UnsupportedOperationException("not implemented: " + instr.kind);
-
-        }
-
-        if (emitDefaultReturn) {
-            emitReturnNextInstruction(b, instr);
-        }
-
-        return method;
-    }
-
-    private CodeExecutableElement createInstructionHandler(TypeMirror returnType, String name) {
+    CodeExecutableElement createInstructionHandler(TypeMirror returnType, String name) {
         CodeExecutableElement method = new CodeExecutableElement(
                         Set.of(PRIVATE),
                         returnType, name);
+        initializeInstructionHandler(method, returnType, name);
+        return method;
+    }
+
+    void initializeInstructionHandler(CodeExecutableElement method, TypeMirror returnType, String name) {
+        method.setVisibility(Modifier.PRIVATE);
+        method.setReturnType(returnType);
+        method.setSimpleName(CodeNames.of(name));
         method.addParameter(new CodeVariableElement(types.FrameWithoutBoxing, "frame"));
         if (parent.model.hasYieldOperation()) {
             method.addParameter(new CodeVariableElement(types.FrameWithoutBoxing, "localFrame"));
@@ -1989,7 +1685,6 @@ final class BytecodeNodeElement extends AbstractElement {
         method.addParameter(new CodeVariableElement(type(byte[].class), "bc"));
         method.addParameter(new CodeVariableElement(type(int.class), "bci"));
         method.addParameter(new CodeVariableElement(type(int.class), "sp"));
-        return method;
     }
 
     private CodeExecutableElement createHandleException() {
@@ -2071,7 +1766,7 @@ final class BytecodeNodeElement extends AbstractElement {
                 b.statement("continue");
                 b.end();
                 b.startStatement().startCall("doEpilogExceptional");
-                b.string("root").string("frame");
+                b.string("frame");
                 if (parent.model.hasYieldOperation()) {
                     b.string("localFrame");
                 }
@@ -2109,7 +1804,7 @@ final class BytecodeNodeElement extends AbstractElement {
                 b.startSwitch().string("readValidBytecode(bc, node.returnBci)").end().startBlock();
                 for (var entry : parent.model.getInstructions().stream().filter((i) -> i.kind == InstructionKind.TAG_LEAVE).collect(BytecodeRootNodeElement.deterministicGroupingBy((i) -> {
                     if (i.isReturnTypeQuickening()) {
-                        return i.signature.returnType;
+                        return i.signature.returnType();
                     } else {
                         return type(Object.class);
                     }
@@ -2205,7 +1900,8 @@ final class BytecodeNodeElement extends AbstractElement {
          */
         b.statement("assert sp >= targetSp - 1");
         b.startWhile().string("sp > targetSp").end().startBlock();
-        b.statement(BytecodeRootNodeElement.clearFrame("frame", "--sp"));
+        b.statement("sp--");
+        b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp"));
         b.end();
         b.statement("sp = targetSp");
         b.startReturn().string(parent.encodeState("bci", "sp")).end();
@@ -2251,6 +1947,45 @@ final class BytecodeNodeElement extends AbstractElement {
 
     }
 
+    protected static void emitThrowIllegalLocalException(BytecodeDSLModel model, CodeTreeBuilder b, CodeTree bci, CodeTree localBytecodeNode, CodeTree localIndex, boolean fastPath) {
+        if (model.loadIllegalLocalStrategy != LoadIllegalLocalStrategy.CUSTOM_EXCEPTION) {
+            throw new AssertionError();
+        }
+
+        if (fastPath && !ElementUtils.isAssignable(model.illegalLocalException, model.getContext().getTypes().AbstractTruffleException)) {
+            // If it's not a Truffle exception, always deopt.
+            b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
+        }
+
+        var factoryMethod = model.illegalLocalExceptionFactory;
+        b.startThrow();
+        b.startStaticCall(factoryMethod.method());
+        for (var param : factoryMethod.parameters()) {
+            switch (param) {
+                case NODE, BYTECODE_NODE -> {
+                    b.string("this");
+                }
+                case BYTECODE_LOCATION -> {
+                    if (bci == null) {
+                        throw new AssertionError();
+                    }
+                    b.startCall("findLocation").tree(bci).end();
+                }
+                case LOCAL_VARIABLE -> {
+                    b.startNew("LocalVariableImpl");
+                    b.tree(localBytecodeNode);
+                    b.startGroup();
+                    b.startParantheses().tree(localIndex).end();
+                    b.string(" * LOCALS_LENGTH");
+                    b.end();
+                    b.end();
+                }
+                default -> throw new AssertionError();
+            }
+        }
+        b.end(2);
+    }
+
     private void buildInstructionCases(CodeTreeBuilder b, InstructionModel instruction) {
         b.startCase().tree(parent.createInstructionConstant(instruction)).end();
         if (tier.isUncached()) {
@@ -2260,1355 +1995,19 @@ final class BytecodeNodeElement extends AbstractElement {
         }
     }
 
-    static boolean isReturn(InstructionModel instr) {
-        switch (instr.kind) {
-            case RETURN:
-            case YIELD:
-            case INVALIDATE:
-            case CUSTOM:
-                if (instr.kind != InstructionKind.CUSTOM || instr.operation.kind == OperationKind.CUSTOM_YIELD) {
-                    return true;
-                }
-                // intentional fallthrough-
-        }
-        return false;
-    }
-
-    private void emitCallInstructionHandler(CodeTreeBuilder b, InstructionModel instr) {
-        emitCallInstructionHandler(b, instr, true);
-    }
-
-    private void emitCallInstructionHandler(CodeTreeBuilder b, InstructionModel instr, boolean returnBci) {
-        CodeExecutableElement method = lookupInstructionHandler(instr, returnBci);
-        BytecodeRootNodeElement.emitCallDefault(b, method, (name, innerB) -> {
-            switch (name) {
-                case "counter":
-                    innerB.string("(");
-                    innerB.startStaticCall(types.CompilerDirectives, "inCompiledCode").end();
-                    innerB.string(" && ");
-                    innerB.startStaticCall(types.CompilerDirectives, "hasNextTier").end();
-                    innerB.string(" ? loopCounter.value : counter)");
-                    break;
-                default:
-                    innerB.string(name);
-                    break;
-            }
-
-        });
-    }
-
-    static void emitReturnNextInstruction(CodeTreeBuilder b, InstructionModel instr) {
-        b.startReturn().string("bci + ").string(instr.getInstructionLength()).end();
-    }
-
     private void buildInstructionCaseBlock(CodeTreeBuilder b, InstructionModel instr) {
         buildInstructionCases(b, instr);
-
         b.startCaseBlock();
-        if (instr.kind == InstructionKind.BRANCH_BACKWARD) {
-            /*
-             * Branch.backward is the only instruction left with a regular handler, because it also
-             * needs to reset the counters.
-             */
-            emitBranchBackward(b, instr);
-        } else {
-            emitInstructionHandler(b, instr);
-        }
-
+        emitInstructionCase(b, instr, null);
         b.end();
     }
 
-    private void emitBranchBackward(CodeTreeBuilder b, InstructionModel instr) {
-        b.startStatement().startStaticCall(types.TruffleSafepoint, "poll").string("this").end().end();
-
-        if (tier.isUncached()) {
-            b.statement("bci = " + BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.BYTECODE_INDEX)));
-
-            b.startIf().string("uncachedExecuteCount_ <= 1").end().startBlock();
-            /*
-             * The force uncached check is put in here so that we don't need to check it in the
-             * common case (the else branch where we just decrement).
-             */
-            b.startIf().string("uncachedExecuteCount_ != ", FORCE_UNCACHED_THRESHOLD).end().startBlock();
-            b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-            b.statement("$root.transitionToCached(frame, bci)");
-            b.statement("return ", parent.encodeState("bci", "sp"));
-            b.end(2);
-            b.startElseBlock();
-            b.statement("uncachedExecuteCount_--");
-            b.end();
-        } else {
-            b.startIf().startStaticCall(types.CompilerDirectives, "hasNextTier").end().end().startBlock();
-            b.startIf().startStaticCall(types.CompilerDirectives, "inCompiledCode").end().end().startBlock();
-            b.statement("counter = ++loopCounter.value");
-            b.end().startElseBlock();
-            b.statement("counter++");
-            b.end();
-
-            b.startIf();
-            b.startStaticCall(types.CompilerDirectives, "injectBranchProbability");
-            b.staticReference(parent.loopCounter.asType(), "REPORT_LOOP_PROBABILITY");
-            b.startGroup();
-            b.string("counter >= ").staticReference(parent.loopCounter.asType(), "REPORT_LOOP_STRIDE");
-            b.end();
-            b.end(); // static call
-            b.end().startBlock();
-
-            b.startDeclaration(type(Object.class), "osrResult");
-            BytecodeRootNodeElement.emitCallDefault(b, this.add(createReportLoopCount(instr)));
-            b.end();
-
-            b.startIf().string("osrResult != null").end().startBlock();
-            /**
-             * executeOSR invokes BytecodeNode#continueAt, which returns a long encoding the sp and
-             * bci when it returns/when the bytecode is rewritten. Returning this value is correct
-             * in either case: If it's a return, we'll read the result out of the frame (the OSR
-             * code copies the OSR frame contents back into our frame first); if it's a rewrite,
-             * we'll transition and continue executing.
-             */
-            b.startReturn().cast(type(long.class)).string("osrResult").end();
-            b.end(); // osrResult != null
-
-            b.startIf().startStaticCall(types.CompilerDirectives, "inCompiledCode").end().end().startBlock();
-            b.statement("loopCounter.value = 0");
-            b.end().startElseBlock();
-            b.statement("counter = 0");
-            b.end();
-
-            b.end(); // if counter >= REPORT_LOOP_STRIDE
-
-            b.startIf().startStaticCall(types.CompilerDirectives, "inCompiledCode").end().end().startBlock();
-            b.statement("counter = 0");
-            b.end();
-
-            b.end();
-            b.statement("bci = " + BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.BYTECODE_INDEX)));
-        }
-        b.statement("break");
-    }
-
-    private void emitCreateVariadicHandler(InstructionModel instr, CodeTreeBuilder b) {
-        b.startDeclaration(type(int.class), "count");
-        b.tree(BytecodeRootNodeElement.readImmediate("bc", "bci", instr.findImmediate(ImmediateKind.INTEGER, "count")));
-        b.end();
-
-        InstructionImmediate offsetImmediate = instr.findImmediate(ImmediateKind.INTEGER, "offset");
-        if (offsetImmediate != null) {
-            b.declaration(type(int.class), "offset", BytecodeRootNodeElement.readImmediate("bc", "bci", offsetImmediate));
-        }
-        String addOffset = (offsetImmediate == null ? "" : "offset + ");
-
-        b.declaration(type(int.class), "newSize", addOffset + "count");
-        if (parent.model.hasVariadicReturn) {
-            b.declaration(type(int.class), "mergeCount", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.findImmediate(ImmediateKind.SHORT, "merge_count")));
-            b.startIf().string("mergeCount > 0").end().startBlock();
-            b.startFor().string("int i = 0; i < mergeCount; i++").end().startBlock();
-
-            b.startDeclaration(type(Object[].class), "dynamicArray");
-            b.startCall("ACCESS.uncheckedCast");
-            b.string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - mergeCount + i"));
-            b.typeLiteral(type(Object[].class));
-            b.end();
-            b.end();
-            b.statement("newSize += dynamicArray.length - 1");
-
-            b.end(); // for mergeDynamicCount
-            b.end(); // if mergeDynamicCount > 0
-        }
-
-        b.declaration(type(Object[].class), "result", "new Object[newSize]");
-        b.declaration(type(int.class), "stackPopCount", "Math.min(count, VARIADIC_STACK_LIMIT)");
-
-        if (parent.model.hasVariadicReturn) {
-            b.startFor().string("int i = 0; i < stackPopCount - mergeCount; i++").end().startBlock();
-        } else {
-            b.startFor().string("int i = 0; i < stackPopCount; i++").end().startBlock();
-        }
-        b.startStatement();
-        if (offsetImmediate == null) {
-            b.string("result[i] = ");
-        } else {
-            b.string("result[offset + i] = ");
-        }
-        b.string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - stackPopCount + i"));
-        b.end();
-        b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - stackPopCount + i"));
-
-        b.end();
-
-        if (parent.model.hasVariadicReturn) {
-            b.startIf().string("mergeCount > 0").end().startBlock();
-            b.declaration(type(int.class), "mergeIndex", addOffset + "stackPopCount - mergeCount");
-            b.startFor().string("int i = 0; i < mergeCount; i++").end().startBlock();
-
-            b.startDeclaration(type(Object[].class), "dynamicArray");
-            b.startCall("ACCESS.uncheckedCast");
-            b.string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - mergeCount + i"));
-            b.typeLiteral(type(Object[].class));
-            b.end();
-            b.end();
-            b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - mergeCount + i"));
-
-            b.declaration(type(int.class), "dynamicLength", "dynamicArray.length");
-            b.startStatement().startStaticCall(type(System.class), "arraycopy");
-            b.string("dynamicArray").string("0").string("result").string("mergeIndex").string("dynamicLength");
-            b.end().end(); // static call, statement
-
-            b.statement("mergeIndex += dynamicLength");
-
-            b.end(); // for mergeDynamicCount
-            b.end(); // if mergeDynamicCount > 0
-        }
-
-        b.startStatement();
-        BytecodeRootNodeElement.startSetFrame(b, type(Object.class)).string("frame").string("sp - stackPopCount").string("result").end();
-        b.end();
-
-        b.statement("return Math.min(count - 1, VARIADIC_STACK_LIMIT - 1)");
-    }
-
-    private void emitLoadVariadicHandler(InstructionModel instr, CodeTreeBuilder b) {
-        b.startDeclaration(type(int.class), "count");
-        b.tree(BytecodeRootNodeElement.readImmediate("bc", "bci", instr.findImmediate(ImmediateKind.SHORT, "count")));
-        b.end();
-
-        b.declaration(type(int.class), "offset", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.findImmediate(ImmediateKind.INTEGER, "offset")));
-        b.startDeclaration(type(Object[].class), "result");
-        b.startCall("ACCESS.uncheckedCast");
-        b.string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - count - 1"));
-        b.typeLiteral(type(Object[].class));
-        b.end();
-        b.end();
-
-        if (parent.model.hasVariadicReturn) {
-            b.declaration(type(int.class), "newSize", "offset + count");
-            b.declaration(type(int.class), "mergeCount", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.findImmediate(ImmediateKind.SHORT, "merge_count")));
-            b.startIf().string("mergeCount > 0").end().startBlock();
-            b.startFor().string("int i = 0; i < mergeCount; i++").end().startBlock();
-
-            b.startDeclaration(type(Object[].class), "dynamicArray");
-            b.startCall("ACCESS.uncheckedCast");
-            b.string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - mergeCount + i"));
-            b.typeLiteral(type(Object[].class));
-            b.end();
-            b.end();
-            b.statement("newSize += dynamicArray.length - 1");
-
-            b.end(); // for mergeDynamicCount
-
-            b.startStatement().string("result = ");
-            b.startStaticCall(type(Arrays.class), "copyOf").string("result").string("newSize").end();
-            b.end(); // statement
-            b.statement(BytecodeRootNodeElement.setFrameObject("frame", "sp - count - 1", "result"));
-
-            b.end(); // if mergeDynamicCount > 0
-
-            b.startFor().string("int i = 0; i < count - mergeCount; i++").end().startBlock();
-        } else {
-            b.startFor().string("int i = 0; i < count; i++").end().startBlock();
-        }
-        b.startStatement();
-        b.string("result[offset + i] = ").string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - count + i"));
-        b.end();
-        b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - count + i"));
-        b.end(); // for
-
-        if (parent.model.hasVariadicReturn) {
-            b.startIf().string("mergeCount > 0").end().startBlock();
-            b.declaration(type(int.class), "mergeIndex", "offset + count - mergeCount");
-            b.startFor().string("int i = 0; i < mergeCount; i++").end().startBlock();
-
-            b.startDeclaration(type(Object[].class), "dynamicArray");
-            b.startCall("ACCESS.uncheckedCast");
-            b.string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - mergeCount + i"));
-            b.typeLiteral(type(Object[].class));
-            b.end();
-            b.end();
-            b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - mergeCount + i"));
-
-            b.declaration(type(int.class), "dynamicLength", "dynamicArray.length");
-            b.startStatement().startStaticCall(type(System.class), "arraycopy");
-            b.string("dynamicArray").string("0").string("result").string("mergeIndex").string("dynamicLength");
-            b.end().end(); // static call, statement
-
-            b.statement("mergeIndex += dynamicLength");
-
-            b.end(); // for mergeDynamicCount
-            b.end(); // if mergeDynamicCount > 0
-        }
-        b.statement("return count");
-    }
-
-    private void emitSplatVariadicHandler(InstructionModel instr, CodeTreeBuilder b) {
-        b.declaration(type(int.class), "offset", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.findImmediate(ImmediateKind.INTEGER, "offset")));
-        b.declaration(type(int.class), "count", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.findImmediate(ImmediateKind.INTEGER, "count")));
-
-        b.startDeclaration(type(Object[].class), "oldArray");
-        b.startCall("ACCESS.uncheckedCast");
-        b.string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - 1"));
-        b.typeLiteral(type(Object[].class));
-        b.end();
-        b.end();
-
-        b.declaration(type(int.class), "newSize", "oldArray.length");
-        b.startFor().string("int i = 0; i < count; i++").end().startBlock();
-
-        b.startDeclaration(type(Object[].class), "dynamicArray");
-        b.startCall("ACCESS.uncheckedCast");
-        b.string("oldArray[offset + i]");
-        b.typeLiteral(type(Object[].class));
-        b.end();
-        b.end();
-        b.statement("newSize += dynamicArray.length - 1");
-
-        b.end(); // for count
-
-        b.declaration(type(Object[].class), "newArray", "new Object[newSize]");
-
-        b.lineComment("copy prefixed elements");
-        b.startStatement().startStaticCall(type(System.class), "arraycopy");
-        b.string("oldArray").string("0").string("newArray").string("0").string("offset");
-        b.end().end();
-
-        // copy dynamic arrays
-        b.lineComment("copy dynamic elements");
-        b.declaration(type(int.class), "mergeIndex", "offset");
-        b.startFor().string("int i = 0; i < count; i++").end().startBlock();
-        b.startDeclaration(type(Object[].class), "dynamicArray");
-        b.startCall("ACCESS.uncheckedCast");
-        b.string("oldArray[offset + i]");
-        b.typeLiteral(type(Object[].class));
-        b.end();
-        b.end(); // declaration
-
-        b.startStatement().startStaticCall(type(System.class), "arraycopy");
-        b.string("dynamicArray").string("0").string("newArray").string("mergeIndex").string("dynamicArray.length");
-        b.end().end();
-        b.statement("mergeIndex += dynamicArray.length");
-        b.end(); // for count
-
-        b.lineComment("copy suffix elements");
-        b.startStatement().startStaticCall(type(System.class), "arraycopy");
-        b.string("oldArray").string("offset + count").string("newArray").string("mergeIndex").string("oldArray.length - offset - count");
-        b.end().end();
-
-        b.statement(BytecodeRootNodeElement.setFrameObject("frame", "sp - 1", "newArray"));
-    }
-
-    private void emitMergeConditionalHandler(InstructionModel instr, CodeTreeBuilder b) throws AssertionError {
-        if (!parent.model.usesBoxingElimination()) {
-            throw new AssertionError("Merge.conditional only supports boxing elimination enabled.");
-        }
-        if (instr.isQuickening() || tier.isUncached() || !parent.model.usesBoxingElimination()) {
-            final TypeMirror inputType = instr.signature.getDynamicOperandType(1);
-            final TypeMirror returnType = instr.signature.returnType;
-
-            if (tier.isCached() && parent.model.usesBoxingElimination()) {
-                b.declaration(inputType, "value");
-                b.startTryBlock();
-                b.startStatement();
-                b.string("value = ");
-                BytecodeRootNodeElement.startExpectFrameUnsafe(b, "frame", inputType).string("sp - 1").end();
-                b.end();
-                b.end().startCatchBlock(types.UnexpectedResultException, "ex");
-                b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-                b.startReturn();
-                emitCallInstructionHandler(b, instr.getQuickeningRoot());
-                b.end();
-                b.end(); // catch block
-            } else {
-                b.startDeclaration(inputType, "value");
-                BytecodeRootNodeElement.startRequireFrame(b, inputType).string("frame").string("sp - 1").end();
-                b.end();
-            }
-
-            b.startStatement();
-            BytecodeRootNodeElement.startSetFrame(b, returnType).string("frame").string("sp - 2").string("value").end();
-            b.end();
-
-            if (ElementUtils.isPrimitive(inputType)) {
-                // we only need to clear in compiled code for liveness if primitive
-                b.startIf().startStaticCall(types.CompilerDirectives, "inCompiledCode").end().end().startBlock();
-                b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-                b.end();
-            } else {
-                // always clear for references for gc behavior.
-                b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-            }
-        } else {
-            b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-            b.startDeclaration(type(Object.class), "local");
-            BytecodeRootNodeElement.startGetFrameUnsafe(b, "frame", null).string("sp - 1").end();
-            b.end();
-
-            InstructionImmediate operand0 = instr.getImmediates(ImmediateKind.BYTECODE_INDEX).get(0);
-            InstructionImmediate operand1 = instr.getImmediates(ImmediateKind.BYTECODE_INDEX).get(1);
-
-            b.startDeclaration(type(boolean.class), "condition");
-            b.cast(type(boolean.class));
-            BytecodeRootNodeElement.startGetFrameUnsafe(b, "frame", null).string("sp - 2");
-            b.end().end();
-
-            b.declaration(type(short.class), "newInstruction");
-            b.declaration(type(short.class), "newOperand");
-            b.declaration(type(short.class), "newOtherOperand");
-            b.declaration(type(int.class), "operandIndex");
-            b.declaration(type(int.class), "otherOperandIndex");
-
-            b.startIf().string("condition").end().startBlock();
-            b.startAssign("operandIndex").tree(BytecodeRootNodeElement.readImmediate("bc", "bci", operand0)).end();
-            b.startAssign("otherOperandIndex").tree(BytecodeRootNodeElement.readImmediate("bc", "bci", operand1)).end();
-            b.end().startElseBlock();
-            b.startAssign("operandIndex").tree(BytecodeRootNodeElement.readImmediate("bc", "bci", operand1)).end();
-            b.startAssign("otherOperandIndex").tree(BytecodeRootNodeElement.readImmediate("bc", "bci", operand0)).end();
-            b.end();
-
-            b.startIf().string("operandIndex != -1 && otherOperandIndex != -1").end().startBlock();
-
-            b.declaration(type(short.class), "operand", BytecodeRootNodeElement.readInstruction("bc", "operandIndex"));
-            b.declaration(type(short.class), "otherOperand", BytecodeRootNodeElement.readInstruction("bc", "otherOperandIndex"));
-            InstructionModel genericInstruction = instr.findGenericInstruction();
-
-            boolean elseIf = false;
-            for (TypeMirror boxingType : parent.model.boxingEliminatedTypes) {
-                elseIf = b.startIf(elseIf);
-                b.string("local").instanceOf(ElementUtils.boxType(boxingType));
-                b.newLine().string("   && (");
-                b.string("(newOperand = ").startCall(BytecodeRootNodeElement.createApplyQuickeningName(boxingType)).string("operand").end().string(") != -1)");
-                b.end().startBlock();
-
-                InstructionModel boxedInstruction = instr.findSpecializedInstruction(boxingType);
-                InstructionModel unboxedInstruction = boxedInstruction.quickenedInstructions.get(0);
-                b.startSwitch().tree(BytecodeRootNodeElement.readInstruction("bc", "bci")).end().startBlock();
-                b.startCase().tree(parent.createInstructionConstant(boxedInstruction.getQuickeningRoot())).end();
-                b.startCase().tree(parent.createInstructionConstant(boxedInstruction)).end();
-                b.startCaseBlock();
-                b.statement("newOtherOperand = otherOperand");
-                b.startAssign("newInstruction").tree(parent.createInstructionConstant(boxedInstruction)).end();
-                b.statement("break");
-                b.end();
-                b.startCase().tree(parent.createInstructionConstant(unboxedInstruction)).end();
-                b.startCaseBlock();
-                b.statement("newOtherOperand = otherOperand");
-                b.startAssign("newInstruction").tree(parent.createInstructionConstant(unboxedInstruction)).end();
-                b.statement("break");
-                b.end();
-                b.caseDefault();
-                b.startCaseBlock();
-                b.statement("newOtherOperand = undoQuickening(otherOperand)");
-                b.startAssign("newInstruction").tree(parent.createInstructionConstant(genericInstruction)).end();
-                b.statement("break");
-                b.end();
-                b.end(); // switch
-
-                b.end(); // if block
-            }
-
-            b.startElseBlock(elseIf);
-            b.statement("newOperand = operand");
-            b.statement("newOtherOperand = undoQuickening(otherOperand)");
-            b.startAssign("newInstruction").tree(parent.createInstructionConstant(genericInstruction)).end();
-            b.end();
-
-            parent.emitQuickeningOperand(b, "this", "bc", "bci", null, 0, "operandIndex", "operand", "newOperand");
-            parent.emitQuickeningOperand(b, "this", "bc", "bci", null, 0, "otherOperandIndex", "otherOperand", "newOtherOperand");
-
-            b.end(); // case both operand indices are valid
-            b.startElseBlock();
-            b.startAssign("newInstruction").tree(parent.createInstructionConstant(genericInstruction)).end();
-            b.end(); // case either operand index is invalid
-
-            parent.emitQuickening(b, "this", "bc", "bci", null, "newInstruction");
-
-            b.startStatement();
-            BytecodeRootNodeElement.startSetFrame(b, type(Object.class)).string("frame").string("sp - 2").string("local").end();
-            b.end();
-            b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-        }
-    }
-
-    private void emitStoreLocalHandler(InstructionModel instr, CodeTreeBuilder b) throws AssertionError {
-        String localsFrame = parent.localFrame();
-        boolean materialized = instr.kind.isLocalVariableMaterializedAccess();
-        if (instr.isQuickening() || tier.isUncached() || !parent.model.usesBoxingElimination()) {
-
-            final TypeMirror inputType = instr.signature.getDynamicOperandType(0);
-            final TypeMirror slotType = instr.specializedType != null ? instr.specializedType : type(Object.class);
-
-            boolean needsLocalTags = localAccessNeedsLocalTags(instr);
-            if (needsLocalTags) {
-                b.declaration(type(byte[].class), "localTags", readLocalTagsFastPath());
-            }
-
-            if (tier.isCached() && parent.model.usesBoxingElimination()) {
-                b.declaration(inputType, "local");
-                b.startTryBlock();
-                b.startStatement().string("local = ");
-                BytecodeRootNodeElement.startExpectFrameUnsafe(b, "frame", inputType).string("sp - 1").end();
-                b.end();
-
-                b.end().startCatchBlock(types.UnexpectedResultException, "ex");
-                b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-                b.startReturn();
-                emitCallInstructionHandler(b, instr.getQuickeningRoot());
-                b.end();
-                b.end(); // catch block
-            } else {
-                b.startDeclaration(inputType, "local");
-                BytecodeRootNodeElement.startRequireFrame(b, inputType).string("frame").string("sp - 1").end();
-                b.end();
-            }
-
-            if (materialized) {
-                localsFrame = "materializedFrame";
-                b.startDeclaration(types.FrameWithoutBoxing, "materializedFrame");
-                b.cast(types.FrameWithoutBoxing).string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - 2"));
-                b.end();
-            }
-
-            boolean generic = ElementUtils.typeEquals(type(Object.class), inputType);
-
-            CodeTree readSlot = BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.FRAME_INDEX));
-            if (generic && !ElementUtils.needsCastTo(inputType, slotType)) {
-                if (materialized) {
-                    b.declaration(type(int.class), "slot", readSlot);
-                    readSlot = CodeTreeBuilder.singleString("slot");
-                    b.declaration(type(int.class), "localRootIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.LOCAL_ROOT)));
-                    if (instr.hasImmediate(ImmediateKind.LOCAL_INDEX)) {
-                        b.declaration(type(int.class), "localIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.LOCAL_INDEX)));
-                    }
-
-                    if (parent.model.usesBoxingElimination()) {
-                        b.declaration(type(int.class), "localOffset", "slot - " + BytecodeRootNodeElement.USER_LOCALS_START_INDEX);
-                        emitValidateMaterializedAccess(b, localsFrame, "localRootIndex", "localRoot", "bytecodeNode", "localIndex");
-                        // We need to update the tags. Call the setter method on the
-                        // bytecodeNode.
-                        b.startStatement().startCall("bytecodeNode.setLocalValueInternal");
-                        b.string(localsFrame);
-                        b.string("localOffset");
-                        if (instr.hasImmediate(ImmediateKind.LOCAL_INDEX)) {
-                            b.string("localIndex");
-                        } else {
-                            b.string("localOffset");
-                        }
-                        b.string("local");
-                        b.end(2);
-                    } else {
-                        emitValidateMaterializedAccess(b, localsFrame, "localRootIndex", "localRoot", null, "localIndex");
-                        b.startStatement();
-                        BytecodeRootNodeElement.startSetFrame(b, slotType).string(localsFrame).tree(readSlot);
-                        b.string("local");
-                        b.end();
-                        b.end();
-                    }
-
-                    b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-                    b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 2"));
-                } else {
-                    b.startStatement();
-                    BytecodeRootNodeElement.startSetFrame(b, slotType).string(localsFrame).tree(readSlot);
-                    b.string("local");
-                    b.end();
-                    b.end();
-                    b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-                }
-                emitReturnNextInstruction(b, instr);
-            } else {
-                if (!parent.model.usesBoxingElimination()) {
-                    throw new AssertionError("Unexpected path.");
-                }
-
-                boolean needsCast = ElementUtils.needsCastTo(inputType, slotType);
-                b.declaration(type(int.class), "slot", readSlot);
-                if (materialized) {
-                    b.declaration(type(int.class), "localRootIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.LOCAL_ROOT)));
-                }
-                String localIndex;
-                if (parent.model.enableBlockScoping) {
-                    b.declaration(type(int.class), "localIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.LOCAL_INDEX)));
-                    localIndex = "localIndex";
-                } else {
-                    localIndex = "slot - " + BytecodeRootNodeElement.USER_LOCALS_START_INDEX;
-                }
-
-                String bytecodeNode;
-                if (materialized) {
-                    emitValidateMaterializedAccess(b, localsFrame, "localRootIndex", "localRoot", "bytecodeNode", "localIndex");
-                    bytecodeNode = "bytecodeNode";
-                } else {
-                    bytecodeNode = "this";
-                }
-
-                b.startDeclaration(type(byte.class), "tag");
-                b.startCall(bytecodeNode, "getCachedLocalTagInternal");
-                if (materialized) {
-                    b.startCall(bytecodeNode, "getLocalTags").end();
-                } else {
-                    b.string("localTags");
-                }
-                b.string(localIndex);
-                b.end(); // call
-                b.end(); // declaration
-
-                b.startIf().string("tag == ").staticReference(parent.frameTagsElement.get(slotType));
-                b.end().startBlock();
-                if (needsCast) {
-                    b.startTryBlock();
-                }
-                b.startStatement();
-                BytecodeRootNodeElement.startSetFrame(b, slotType).string(localsFrame).string("slot");
-                if (needsCast) {
-                    b.startStaticCall(parent.lookupExpectMethod(inputType, slotType));
-                    b.string("local");
-                    b.end();
-                } else {
-                    b.string("local");
-                }
-                b.end(); // set frame
-                b.end(); // statement
-
-                if (materialized) {
-                    b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-                    b.startIf().startStaticCall(types.CompilerDirectives, "inCompiledCode").end().end().startBlock();
-                    b.lineComment("Clear primitive for compiler liveness analysis");
-                    b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 2"));
-                    b.end();
-                } else {
-                    b.startIf().startStaticCall(types.CompilerDirectives, "inCompiledCode").end().end().startBlock();
-                    b.lineComment("Clear primitive for compiler liveness analysis");
-                    b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-                    b.end();
-                }
-
-                emitReturnNextInstruction(b, instr);
-
-                if (needsCast) {
-                    b.end().startCatchBlock(types.UnexpectedResultException, "ex");
-                    b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-                    b.statement("local = ex.getResult()");
-                    b.lineComment("fall through to slow-path");
-                    b.end();  // catch block
-                }
-
-                b.end();
-                b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-                b.startReturn();
-                emitCallInstructionHandler(b, instr.getQuickeningRoot());
-                b.end();
-
-            }
-        } else {
-
-            b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-            b.startDeclaration(type(Object.class), "local");
-            BytecodeRootNodeElement.startGetFrameUnsafe(b, "frame", null).string("sp - 1").end();
-            b.end();
-
-            if (materialized) {
-                localsFrame = "materializedFrame";
-                b.startDeclaration(types.FrameWithoutBoxing, "materializedFrame");
-                b.cast(types.FrameWithoutBoxing).string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - 2"));
-                b.end();
-            }
-
-            boolean needsLocalTags = localAccessNeedsLocalTags(instr);
-            if (needsLocalTags) {
-                b.declaration(type(byte[].class), "localTags", readLocalTagsFastPath());
-            }
-
-            b.declaration(type(short.class), "newInstruction");
-            b.declaration(type(int.class), "slot", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.FRAME_INDEX)));
-            if (materialized) {
-                b.declaration(type(int.class), "localRootIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.LOCAL_ROOT)));
-            }
-
-            String localIndex;
-            if (parent.model.enableBlockScoping) {
-                b.declaration(type(int.class), "localIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.LOCAL_INDEX)));
-                localIndex = "localIndex";
-            } else {
-                localIndex = "slot - " + BytecodeRootNodeElement.USER_LOCALS_START_INDEX;
-            }
-            b.declaration(type(int.class), "operandIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.BYTECODE_INDEX)));
-
-            String bytecodeNode;
-            if (materialized) {
-                emitValidateMaterializedAccess(b, localsFrame, "localRootIndex", "localRoot", "bytecodeNode", "localIndex");
-                bytecodeNode = "bytecodeNode";
-            } else {
-                bytecodeNode = "this";
-            }
-
-            b.declaration(type(short.class), "newOperand");
-            b.declaration(type(short.class), "operand", BytecodeRootNodeElement.readInstruction("bc", "operandIndex"));
-
-            b.startDeclaration(type(byte.class), "oldTag");
-            b.startCall(bytecodeNode, "getCachedLocalTagInternal");
-            if (materialized) {
-                b.startCall(bytecodeNode, "getLocalTags").end();
-            } else {
-                b.string("localTags");
-            }
-            b.string(localIndex);
-            b.end(); // call
-            b.end(); // declaration
-            b.declaration(type(byte.class), "newTag");
-
-            InstructionModel genericInstruction = instr.findGenericInstruction();
-
-            boolean elseIf = false;
-            for (TypeMirror boxingType : parent.model.boxingEliminatedTypes) {
-                elseIf = b.startIf(elseIf);
-                b.string("local").instanceOf(ElementUtils.boxType(boxingType)).end().startBlock();
-
-                // instruction for unsuccessful operand quickening
-                InstructionModel boxedInstruction = instr.findSpecializedInstruction(boxingType);
-                // instruction for successful operand quickening
-                InstructionModel unboxedInstruction = boxedInstruction.quickenedInstructions.get(0);
-
-                b.startSwitch().string("oldTag").end().startBlock();
-
-                b.startCase().staticReference(parent.frameTagsElement.get(boxingType)).end();
-                b.startCase().staticReference(parent.frameTagsElement.getIllegal()).end();
-                b.startCaseBlock();
-
-                b.startIf().string("(newOperand = ").startCall(BytecodeRootNodeElement.createApplyQuickeningName(boxingType)).string("operand").end().string(") != -1").end().startBlock();
-                b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(unboxedInstruction)).end();
-                b.end().startElseBlock();
-                b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(boxedInstruction)).end();
-                b.startStatement().string("newOperand = operand").end();
-                b.end(); // else block
-                String kindName = ElementUtils.firstLetterUpperCase(ElementUtils.getSimpleName(boxingType));
-                parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "StoreLocal$" + kindName);
-                b.startStatement().string("newTag = ").staticReference(parent.frameTagsElement.get(boxingType)).end();
-                b.startStatement();
-                BytecodeRootNodeElement.startSetFrame(b, boxingType).string(localsFrame).string("slot").startGroup().cast(boxingType).string("local").end().end();
-                b.end();
-                b.statement("break");
-                b.end();
-
-                for (TypeMirror otherType : parent.model.boxingEliminatedTypes) {
-                    if (ElementUtils.typeEquals(otherType, boxingType)) {
-                        continue;
-                    }
-                    b.startCase().staticReference(parent.frameTagsElement.get(otherType)).end();
-                }
-
-                b.startCase().staticReference(parent.frameTagsElement.getObject()).end();
-                b.startCaseBlock();
-                b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(genericInstruction)).end();
-                b.startStatement().string("newOperand = ").startCall("undoQuickening").string("operand").end().end();
-                b.startStatement().string("newTag = ").staticReference(parent.frameTagsElement.getObject()).end();
-                parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "StoreLocal$" + genericInstruction.getQualifiedQuickeningName());
-                b.startStatement();
-                BytecodeRootNodeElement.startSetFrame(b, type(Object.class)).string(localsFrame).string("slot").string("local").end();
-                b.end();
-                b.statement("break");
-                b.end();
-
-                b.caseDefault().startCaseBlock();
-                b.tree(GeneratorUtils.createShouldNotReachHere("Unexpected frame tag."));
-                b.end();
-
-                b.end(); // switch
-                b.end(); // if block
-            }
-
-            b.startElseBlock(elseIf);
-            b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(genericInstruction)).end();
-            b.startStatement().string("newOperand = ").startCall("undoQuickening").string("operand").end().end();
-            b.startStatement().string("newTag = ").staticReference(parent.frameTagsElement.getObject()).end();
-            parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "StoreLocal$" + genericInstruction.getQualifiedQuickeningName());
-            b.startStatement();
-            BytecodeRootNodeElement.startSetFrame(b, type(Object.class)).string(localsFrame).string("slot").string("local").end();
-            b.end();
-            b.end(); // else
-
-            b.startIf().string("newTag != oldTag").end().startBlock();
-            b.startStatement().startCall(bytecodeNode, "setCachedLocalTagInternal");
-            if (materialized) {
-                b.startCall(bytecodeNode, "getLocalTags").end();
-            } else {
-                b.string("localTags");
-            }
-            if (parent.model.enableBlockScoping) {
-                b.string("localIndex");
-            } else {
-                b.string("slot - " + BytecodeRootNodeElement.USER_LOCALS_START_INDEX);
-            }
-            b.string("newTag");
-            b.end(2);
-            b.end(); // if newTag != oldTag
-
-            parent.emitQuickeningOperand(b, "this", "bc", "bci", null, 0, "operandIndex", "operand", "newOperand");
-
-            parent.emitQuickening(b, "this", "bc", "bci", null, "newInstruction");
-
-            b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-            if (instr.kind == InstructionKind.STORE_LOCAL_MATERIALIZED) {
-                b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 2"));
-            }
-            emitReturnNextInstruction(b, instr);
-        }
-    }
-
-    private void emitLoadLocalHandler(InstructionModel instr, CodeTreeBuilder b) {
-        boolean materialized = instr.kind.isLocalVariableMaterializedAccess();
-        String localsFrame = parent.localFrame();
-        if (instr.isQuickening() || tier.isUncached() || !parent.model.usesBoxingElimination()) {
-            if (materialized) {
-                localsFrame = "materializedFrame";
-                b.startDeclaration(types.FrameWithoutBoxing, "materializedFrame");
-                b.cast(types.FrameWithoutBoxing).string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - 1"));
-                b.end();
-            }
-
-            final TypeMirror inputType = instr.signature.returnType;
-            final TypeMirror slotType = instr.specializedType != null ? instr.specializedType : type(Object.class);
-
-            CodeTree readSlot = BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.FRAME_INDEX));
-            if (materialized) {
-                b.declaration(type(int.class), "slot", readSlot);
-                b.declaration(type(int.class), "localRootIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.LOCAL_ROOT)));
-                if (instr.hasImmediate(ImmediateKind.LOCAL_INDEX)) {
-                    b.declaration(type(int.class), "localIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.LOCAL_INDEX)));
-                }
-                emitValidateMaterializedAccess(b, localsFrame, "localRootIndex", "localRoot", null, "localIndex");
-                readSlot = CodeTreeBuilder.singleString("slot");
-            }
-
-            boolean generic = ElementUtils.typeEquals(type(Object.class), slotType);
-
-            if (!generic) {
-                b.startTryBlock();
-            }
-
-            b.startStatement();
-            BytecodeRootNodeElement.startSetFrame(b, inputType).string("frame");
-            if (materialized) {
-                b.string("sp - 1"); // overwrite the materialized frame
-            } else {
-                b.string("sp");
-            }
-            if (generic) {
-                BytecodeRootNodeElement.startRequireFrame(b, slotType).string(localsFrame).tree(readSlot).end();
-            } else {
-                BytecodeRootNodeElement.startExpectFrameUnsafe(b, localsFrame, slotType).tree(readSlot).end();
-            }
-            b.end();
-            b.end(); // statement
-
-            if (!generic) {
-                b.end().startCatchBlock(types.UnexpectedResultException, "ex");
-                b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-                b.startReturn();
-                emitCallInstructionHandler(b, instr.getQuickeningRoot());
-                b.end();
-                b.end();
-            }
-
-        } else {
-            b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-
-            if (materialized) {
-                localsFrame = "materializedFrame";
-                b.startDeclaration(types.FrameWithoutBoxing, "materializedFrame");
-                b.cast(types.FrameWithoutBoxing).string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - 1"));
-                b.end();
-            }
-
-            boolean needsLocalTags = localAccessNeedsLocalTags(instr);
-            if (needsLocalTags) {
-                b.declaration(type(byte[].class), "localTags", readLocalTagsFastPath());
-            }
-
-            b.declaration(type(int.class), "slot", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.FRAME_INDEX)));
-            if (materialized) {
-                b.declaration(type(int.class), "localRootIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.LOCAL_ROOT)));
-            }
-            String localIndex;
-            if (parent.model.enableBlockScoping) {
-                b.declaration(type(int.class), "localIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.LOCAL_INDEX)));
-                localIndex = "localIndex";
-            } else {
-                localIndex = "slot - " + BytecodeRootNodeElement.USER_LOCALS_START_INDEX;
-            }
-
-            String bytecodeNode;
-            if (materialized) {
-                emitValidateMaterializedAccess(b, localsFrame, "localRootIndex", "localRoot", "bytecodeNode", "localIndex");
-                bytecodeNode = "bytecodeNode";
-            } else {
-                bytecodeNode = "this";
-            }
-
-            b.startDeclaration(type(byte.class), "tag");
-            b.startCall(bytecodeNode, "getCachedLocalTagInternal");
-            if (materialized) {
-                b.startCall(bytecodeNode, "getLocalTags").end();
-            } else {
-                b.string("localTags");
-            }
-            b.string(localIndex);
-            b.end(); // call
-            b.end(); // declaration
-
-            b.declaration(type(Object.class), "value");
-            b.declaration(type(short.class), "newInstruction");
-            InstructionModel genericInstruction = instr.findGenericInstruction();
-            b.startTryBlock();
-
-            b.startSwitch().string("tag").end().startBlock();
-            for (TypeMirror boxingType : parent.model.boxingEliminatedTypes) {
-                InstructionModel boxedInstruction = instr.findSpecializedInstruction(boxingType);
-
-                b.startCase().staticReference(parent.frameTagsElement.get(boxingType)).end();
-                b.startCaseBlock();
-                b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(boxedInstruction)).end();
-                parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "LoadLocal$" + boxedInstruction.getQuickeningName());
-                b.startStatement();
-                b.string("value = ");
-                BytecodeRootNodeElement.startExpectFrameUnsafe(b, localsFrame, boxingType).string("slot").end();
-                b.end();
-                b.statement("break");
-                b.end();
-            }
-
-            b.startCase().staticReference(parent.frameTagsElement.getObject()).end();
-            b.startCase().staticReference(parent.frameTagsElement.getIllegal()).end();
-            b.startCaseBlock();
-            b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(genericInstruction)).end();
-            parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "LoadLocal$" + genericInstruction.getQuickeningName());
-            b.startStatement();
-            b.string("value = ");
-            BytecodeRootNodeElement.startExpectFrameUnsafe(b, localsFrame, type(Object.class)).string("slot").end();
-            b.end();
-            b.statement("break");
-            b.end();
-
-            b.caseDefault().startCaseBlock();
-            b.tree(GeneratorUtils.createShouldNotReachHere("Unexpected frame tag."));
-            b.end();
-
-            b.end(); // switch
-
-            b.end().startCatchBlock(types.UnexpectedResultException, "ex");
-            b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-
-            // If a FrameSlotException occurs, specialize to the generic version.
-            b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(genericInstruction)).end();
-            parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "LoadLocal$" + genericInstruction.getQuickeningName());
-            b.startStatement();
-            b.string("value = ex.getResult()");
-            b.end();
-
-            b.end(); // catch
-
-            parent.emitQuickening(b, "this", "bc", "bci", null, "newInstruction");
-            b.startStatement();
-            BytecodeRootNodeElement.startSetFrame(b, type(Object.class)).string("frame");
-            if (materialized) {
-                b.string("sp - 1"); // overwrite the materialized frame
-            } else {
-                b.string("sp");
-            }
-            b.string("value").end();
-            b.end();
-        }
-    }
-
-    private void emitPopHandler(InstructionModel instr, CodeTreeBuilder b) {
-        if (instr.isQuickening() || tier.isUncached() || !parent.model.usesBoxingElimination()) {
-            TypeMirror inputType = instr.signature.getDynamicOperandType(0);
-            boolean isGeneric = ElementUtils.isObject(inputType);
-
-            if (isGeneric) {
-                b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-            } else {
-                b.startIf().string("frame.getTag(sp - 1) != ").staticReference(parent.frameTagsElement.get(inputType)).end().startBlock();
-                b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-                b.startReturn();
-                emitCallInstructionHandler(b, instr.getQuickeningRoot());
-                b.end();
-                b.end();
-
-                b.startIf().startStaticCall(types.CompilerDirectives, "inCompiledCode").end().end().startBlock();
-                b.lineComment("Always clear in compiled code for liveness analysis");
-                b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-                b.end();
-            }
-        } else {
-            b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-
-            Map<TypeMirror, InstructionModel> typeToSpecialization = new LinkedHashMap<>();
-            List<InstructionModel> specializations = instr.quickenedInstructions;
-            InstructionModel genericInstruction = null;
-            for (InstructionModel specialization : specializations) {
-                if (parent.model.isBoxingEliminated(specialization.specializedType)) {
-                    typeToSpecialization.put(specialization.specializedType, specialization);
-                } else if (specialization.specializedType == null) {
-                    genericInstruction = specialization;
-                }
-            }
-
-            b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-
-            b.declaration(type(short.class), "newInstruction");
-            b.declaration(type(int.class), "operandIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.BYTECODE_INDEX)));
-
-            // Pop may not have a valid child bci.
-            b.startIf().string("operandIndex != -1").end().startBlock();
-
-            b.declaration(type(short.class), "newOperand");
-            b.declaration(type(short.class), "operand", BytecodeRootNodeElement.readInstruction("bc", "operandIndex"));
-            b.startStatement();
-            b.type(type(Object.class)).string(" value = ");
-            BytecodeRootNodeElement.startRequireFrame(b, type(Object.class)).string("frame").string("sp - 1").end();
-            b.end();
-
-            boolean elseIf = false;
-            for (var entry : typeToSpecialization.entrySet()) {
-                TypeMirror typeGroup = entry.getKey();
-                elseIf = b.startIf(elseIf);
-                b.string("value instanceof ").type(ElementUtils.boxType(typeGroup)).string(" && ");
-                b.newLine().string("     (newOperand = ").startCall(BytecodeRootNodeElement.createApplyQuickeningName(typeGroup)).string("operand").end().string(") != -1");
-                b.end().startBlock();
-
-                InstructionModel specialization = entry.getValue();
-                b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(specialization)).end();
-                b.end(); // if block
-            }
-
-            b.startElseBlock(elseIf);
-            b.statement("newOperand = undoQuickening(operand)");
-            b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(genericInstruction)).end();
-            b.end();
-
-            parent.emitQuickeningOperand(b, "this", "bc", "bci", null, 0, "operandIndex", "operand", "newOperand");
-
-            b.end(); // case operandIndex != -1
-            b.startElseBlock();
-            b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(genericInstruction)).end();
-            b.end(); // case operandIndex == -1
-
-            parent.emitQuickening(b, "this", "bc", "bci", null, "newInstruction");
-            b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-        }
-    }
-
-    private void emitLoadConstantHandler(InstructionModel instr, CodeTreeBuilder b) {
-        TypeMirror returnType = instr.signature.returnType;
-        if (tier.isUncached() || (parent.model.usesBoxingElimination() && !ElementUtils.isObject(returnType))) {
-            b.startStatement();
-            BytecodeRootNodeElement.startSetFrame(b, returnType).string("frame").string("sp");
-            b.tree(parent.readConstFastPath(BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.CONSTANT)), "this.constants", returnType));
-            b.end();
-            b.end();
-        } else {
-            b.startIf().startStaticCall(types.CompilerDirectives, "inCompiledCode").end(2).startBlock();
-            b.statement("loadConstantCompiled(frame, bc, bci, sp)");
-            b.end().startElseBlock();
-            b.statement(BytecodeRootNodeElement.setFrameObject("sp",
-                            parent.readConstFastPath(BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.CONSTANT)), "this.constants").toString()));
-            b.end();
-        }
-    }
-
-    private void emitLoadArgumentHandler(InstructionModel instr, CodeTreeBuilder b) {
-        if (instr.isReturnTypeQuickening()) {
-            TypeMirror returnType = instr.signature.returnType;
-            b.startTryBlock();
-            b.startStatement();
-            BytecodeRootNodeElement.startSetFrame(b, returnType).string("frame").string("sp");
-            b.startGroup();
-            b.startStaticCall(parent.lookupExpectMethod(type(Object.class), returnType));
-            b.string(parent.localFrame() + ".getArguments()[" + BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.SHORT)).toString() + "]");
-            b.end(); // expect
-            b.end(); // argument group
-            b.end(); // set frame
-            b.end(); // statement
-            b.end().startCatchBlock(types.UnexpectedResultException, "e"); // try
-            b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-            parent.emitQuickening(b, "this", "bc", "bci", null,
-                            b.create().tree(parent.createInstructionConstant(instr.getQuickeningRoot())).build());
-            b.startStatement();
-            BytecodeRootNodeElement.startSetFrame(b, type(Object.class)).string("frame").string("sp");
-            b.string("e.getResult()");
-            b.end(); // set frame
-            b.end(); // statement
-            b.end(); // catch block
-        } else {
-            InstructionImmediate argIndex = instr.getImmediate(ImmediateKind.SHORT);
-            b.startStatement();
-            BytecodeRootNodeElement.startSetFrame(b, type(Object.class)).string("frame").string("sp");
-            b.startGroup();
-            b.string(parent.localFrame() + ".getArguments()[" + BytecodeRootNodeElement.readImmediate("bc", "bci", argIndex).toString() + "]");
-            b.end(); // argument group
-            b.end(); // set frame
-            b.end(); // statement
-        }
-    }
-
-    private void emitTagLeaveAndSpecializeHandler(InstructionModel instr, CodeTreeBuilder b) {
-        Map<TypeMirror, InstructionModel> typeToSpecialization = new LinkedHashMap<>();
-        List<InstructionModel> specializations = instr.quickenedInstructions;
-        InstructionModel genericInstruction = null;
-        for (InstructionModel specialization : specializations) {
-            if (parent.model.isBoxingEliminated(specialization.specializedType)) {
-                typeToSpecialization.put(specialization.specializedType, specialization);
-            } else if (specialization.specializedType == null) {
-                genericInstruction = specialization;
-            }
-        }
-
-        b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-
-        b.declaration(type(short.class), "newInstruction");
-        b.declaration(type(short.class), "newOperand");
-        b.declaration(type(int.class), "operandIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.BYTECODE_INDEX)));
-        b.declaration(type(short.class), "operand", BytecodeRootNodeElement.readInstruction("bc", "operandIndex"));
-
-        b.startStatement();
-        b.type(type(Object.class)).string(" value = ");
-        BytecodeRootNodeElement.startRequireFrame(b, type(Object.class)).string("frame").string("sp - 1").end();
-        b.end();
-
-        boolean elseIf = false;
-        for (var entry : typeToSpecialization.entrySet()) {
-            TypeMirror typeGroup = entry.getKey();
-            elseIf = b.startIf(elseIf);
-            b.string("value instanceof ").type(ElementUtils.boxType(typeGroup)).string(" && ");
-            b.newLine().string("     (newOperand = ").startCall(BytecodeRootNodeElement.createApplyQuickeningName(typeGroup)).string("operand").end().string(") != -1");
-            b.end().startBlock();
-
-            InstructionModel specialization = entry.getValue();
-            b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(specialization)).end();
-            b.end(); // else block
-            b.end(); // if block
-        }
-
-        b.startElseBlock(elseIf);
-        b.statement("newOperand = undoQuickening(operand)");
-        b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(genericInstruction)).end();
-        b.end();
-
-        parent.emitQuickeningOperand(b, "this", "bc", "bci", null, 0, "operandIndex", "operand", "newOperand");
-        parent.emitQuickening(b, "this", "bc", "bci", null, "newInstruction");
-
-        InstructionImmediate imm = instr.getImmediate(ImmediateKind.TAG_NODE);
-        b.startDeclaration(parent.tagNode.asType(), "tagNode");
-        b.tree(BytecodeRootNodeElement.readTagNode(parent.tagNode.asType(), BytecodeRootNodeElement.readImmediate("bc", "bci", imm)));
-        b.end();
-        b.startStatement().startCall("tagNode.findProbe().onReturnValue");
-        b.string(parent.localFrame());
-        b.string("value");
-        b.end(2);
-    }
-
-    private void emitTagLeaveHandler(InstructionModel instr, CodeTreeBuilder b) {
-        TypeMirror inputType = instr.specializedType == null ? instr.signature.getDynamicOperandType(0) : instr.specializedType;
-        TypeMirror returnType = instr.signature.returnType;
-        boolean isSpecialized = instr.specializedType != null;
-
-        b.declaration(inputType, "returnValue");
-        if (isSpecialized) {
-            b.startTryBlock();
-        }
-        b.startAssign("returnValue");
-        if (isSpecialized) {
-            BytecodeRootNodeElement.startExpectFrameUnsafe(b, "frame", inputType);
-        } else {
-            BytecodeRootNodeElement.startRequireFrame(b, inputType);
-            b.string("frame");
-        }
-        b.string("sp - 1");
-        b.end();
-        b.end(); // declaration
-
-        if (isSpecialized) {
-            b.end().startCatchBlock(types.UnexpectedResultException, "ex");
-            b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-            b.startReturn();
-            emitCallInstructionHandler(b, instr.getQuickeningRoot());
-            b.end();
-        }
-
-        b.end();
-
-        InstructionImmediate imm = instr.getImmediate(ImmediateKind.TAG_NODE);
-        b.startDeclaration(parent.tagNode.asType(), "tagNode");
-        b.tree(BytecodeRootNodeElement.readTagNode(parent.tagNode.asType(), BytecodeRootNodeElement.readImmediate("bc", "bci", imm)));
-        b.end();
-        b.startStatement().startCall("tagNode.findProbe().onReturnValue");
-        b.string(parent.localFrame());
-        b.string("returnValue");
-        b.end(2);
-
-        if (isSpecialized && !ElementUtils.typeEquals(inputType, returnType)) {
-            b.startStatement();
-            BytecodeRootNodeElement.startSetFrame(b, returnType).string("frame").string("sp - 1").string("returnValue").end();
-            b.end();
-        }
-    }
-
-    private void emitBranchFalseHandler(InstructionModel instr, CodeTreeBuilder b) {
-        String booleanValue = "(boolean) " + BytecodeRootNodeElement.uncheckedGetFrameObject("sp - 1");
-        if (tier.isUncached()) {
-            b.startIf();
-            b.string(booleanValue);
-            // no need to clear in uncached
-            b.end(); // if
-            b.startBlock();
-        } else {
-            if (!parent.model.isBoxingEliminated(type(boolean.class))) {
-                b.declaration(type(boolean.class), "condition", booleanValue);
-            } else if (instr.isQuickening()) {
-                TypeMirror inputType = instr.signature.getDynamicOperandType(0);
-
-                b.declaration(type(boolean.class), "condition");
-                b.startTryBlock();
-                b.startAssign("condition");
-
-                if (ElementUtils.isObject(inputType)) {
-                    b.string("(boolean) ");
-                }
-                BytecodeRootNodeElement.startExpectFrameUnsafe(b, "frame", inputType);
-                b.string("sp - 1");
-                b.end();
-                b.end(); // declaration
-
-                b.startIf().startStaticCall(types.CompilerDirectives, "inCompiledCode").end().end().startBlock();
-                b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-                b.end();
-
-                b.end().startCatchBlock(types.UnexpectedResultException, "ex");
-                b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-                b.startReturn();
-                emitCallInstructionHandler(b, instr.getQuickeningRoot());
-                b.end();
-                b.end();
-
-            } else {
-                b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-
-                b.startDeclaration(type(boolean.class), "condition");
-                b.string("(boolean) ");
-                BytecodeRootNodeElement.startGetFrameUnsafe(b, "frame", null);
-                b.string("sp - 1");
-                b.end(); // require frame
-                b.end(); // declaration
-
-                TypeMirror boxingType = type(boolean.class);
-
-                if (instr.quickenedInstructions.size() != 2) {
-                    throw new AssertionError("Unexpected quickening count");
-                }
-
-                InstructionModel boxedInstruction = null;
-                InstructionModel unboxedInstruction = null;
-                for (InstructionModel quickening : instr.getFlattenedQuickenedInstructions()) {
-                    if (ElementUtils.isObject(quickening.signature.getDynamicOperandType(0))) {
-                        boxedInstruction = quickening;
-                    } else {
-                        unboxedInstruction = quickening;
-                    }
-                }
-
-                if (boxedInstruction == null || unboxedInstruction == null) {
-                    throw new AssertionError("Unexpected quickenings");
-                }
-
-                b.declaration(type(short.class), "newInstruction");
-                b.declaration(type(short.class), "newOperand");
-                b.declaration(type(int.class), "operandIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instr.findImmediate(ImmediateKind.BYTECODE_INDEX, "child0")));
-                b.declaration(type(short.class), "operand", BytecodeRootNodeElement.readInstruction("bc", "operandIndex"));
-
-                b.startIf().string("(newOperand = ").startCall(BytecodeRootNodeElement.createApplyQuickeningName(boxingType)).string("operand").end().string(") != -1").end().startBlock();
-                b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(unboxedInstruction)).end();
-                parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "BranchFalse$" + unboxedInstruction.getQuickeningName());
-                b.end().startElseBlock();
-                b.startStatement().string("newInstruction = ").tree(parent.createInstructionConstant(boxedInstruction)).end();
-                b.startStatement().string("newOperand = operand").end();
-                parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "BranchFalse$" + boxedInstruction.getQuickeningName());
-                b.end(); // else block
-
-                parent.emitQuickeningOperand(b, "this", "bc", "bci", null, 0, "operandIndex", "operand", "newOperand");
-                parent.emitQuickening(b, "this", "bc", "bci", null, "newInstruction");
-
-                b.lineComment("no need clear boolean locals in slow-path");
-            }
-
-            b.startIf();
-            b.startCall("profileBranch");
-            b.tree(BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.BRANCH_PROFILE)));
-            b.string("condition");
-            b.end();
-            b.end().startBlock();
-        }
-        b.statement("return bci + " + instr.getInstructionLength());
-        b.end().startElseBlock();
-        b.statement("return " + BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate("branch_target")));
-        b.end();
-    }
-
-    private void emitCustomShortCircuitHandler(InstructionModel instr, CodeTreeBuilder b) {
-        ShortCircuitInstructionModel shortCircuitInstruction = instr.shortCircuitModel;
-
-        b.startIf();
-        if (tier.isCached()) {
-            b.startCall("profileBranch");
-            b.tree(BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.BRANCH_PROFILE)));
-            b.startGroup();
-        }
-
-        if (shortCircuitInstruction.continueWhen()) {
-            b.string("!");
-        }
-        b.string("(boolean) ").string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - 1"));
-
-        if (tier.isCached()) {
-            b.end(2); // profileBranch call
-        }
-        b.end().startBlock();
-        /*
-         * NB: Short circuit operations can evaluate to an operand or to the boolean conversion of
-         * an operand. The stack is different in either case.
-         */
-        if (shortCircuitInstruction.producesBoolean()) {
-            // Stack: [..., convertedValue]
-            // leave convertedValue on the top of stack
-        } else {
-            // Stack: [..., value, convertedValue]
-            // pop convertedValue
-            b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-        }
-        b.statement("return true");
-        b.end().startElseBlock();
-        if (shortCircuitInstruction.producesBoolean()) {
-            // Stack: [..., convertedValue]
-            // clear convertedValue
-            b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-        } else {
-            // Stack: [..., value, convertedValue]
-            // clear convertedValue and value
-            b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 1"));
-            b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - 2"));
-        }
-
-        b.statement("return false");
-        b.end(); // else
+    private void emitInstructionCase(CodeTreeBuilder caseBuilder, InstructionModel instr, CodeTree effectGroup) {
+        this.add(new BytecodeInstructionHandler(this, instr, effectGroup).emit(caseBuilder));
     }
 
     private static boolean isInstructionReachable(InstructionModel model) {
         return !model.isEpilogExceptional();
-    }
-
-    private void emitInvalidate(CodeTreeBuilder b) {
-        if (tier.isCached()) {
-            b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-        }
-        emitBeforeReturnProfilingHandler(b);
-        b.startReturn().string(parent.encodeState("bci", "sp")).end();
     }
 
     private CodeExecutableElement createResolveControlFlowException() {
@@ -3753,29 +2152,12 @@ final class BytecodeNodeElement extends AbstractElement {
     }
 
     private CodeExecutableElement createDoEpilogExceptional() {
-        CodeExecutableElement method = new CodeExecutableElement(
-                        Set.of(PRIVATE),
-                        type(void.class), "doEpilogExceptional");
-
-        method.addParameter(new CodeVariableElement(parent.asType(), "$root"));
-        method.addParameter(new CodeVariableElement(types.FrameWithoutBoxing, "frame"));
-        if (parent.model.hasYieldOperation()) {
-            method.addParameter(new CodeVariableElement(types.FrameWithoutBoxing, "localFrame"));
-        }
-        method.addParameter(new CodeVariableElement(type(byte[].class), "bc"));
-        method.addParameter(new CodeVariableElement(type(int.class), "bci"));
-        method.addParameter(new CodeVariableElement(type(int.class), "sp"));
+        InstructionModel instruction = parent.model.epilogExceptional.operation.instruction;
+        CodeExecutableElement method = new BytecodeInstructionHandler(this, instruction, null).emit(CodeTreeBuilder.createBuilder());
+        method.setSimpleName(CodeNames.of("doEpilogExceptional"));
+        method.setReturnType(type(void.class));
         method.addParameter(new CodeVariableElement(types.AbstractTruffleException, "exception"));
         method.addParameter(new CodeVariableElement(type(int.class), "nodeId"));
-
-        CodeTreeBuilder b = method.createBuilder();
-        TypeMirror cachedType = BytecodeRootNodeElement.getCachedDataClassType(parent.model.epilogExceptional.operation.instruction);
-        if (tier.isCached()) {
-            b.declaration(cachedType, "node", "this.epilogExceptionalNode_");
-        }
-
-        List<CodeVariableElement> extraParams = createExtraParameters();
-        buildCallExecute(b, parent.model.epilogExceptional.operation.instruction, "exception", extraParams);
         return method;
     }
 
@@ -3819,131 +2201,18 @@ final class BytecodeNodeElement extends AbstractElement {
         b.string("exception");
         b.string("wasOnReturnExecuted");
         b.end(2);
-
         return method;
 
     }
 
-    private CodeExecutableElement createReportLoopCount(InstructionModel instr) {
-        CodeExecutableElement method = new CodeExecutableElement(
-                        Set.of(PRIVATE),
-                        type(Object.class), "reportLoopCount");
-
-        method.addParameter(new CodeVariableElement(types.FrameWithoutBoxing, "frame"));
-        if (parent.model.hasYieldOperation()) {
-            method.addParameter(new CodeVariableElement(types.FrameWithoutBoxing, "localFrame"));
-        }
-        method.addParameter(new CodeVariableElement(type(byte[].class), "bc"));
-        method.addParameter(new CodeVariableElement(type(int.class), "bci"));
-        method.addParameter(new CodeVariableElement(type(int.class), "sp"));
-        method.addParameter(new CodeVariableElement(type(int.class), "counter"));
-
-        CodeTreeBuilder b = method.createBuilder();
-
-        b.startStatement().startStaticCall(types.LoopNode, "reportLoopCount");
-        b.string("this");
-        b.string("counter");
-        b.end().end(); // statement
-
-        b.startIf().startStaticCall(types.CompilerDirectives, "inInterpreter").end().string("&&").startStaticCall(types.BytecodeOSRNode, "pollOSRBackEdge").string("this").string(
-                        "counter").end().end().startBlock();
-        /**
-         * When a while loop is compiled by OSR, its "false" branch profile may be zero, in which
-         * case the compiler will stop at loop exits. To coerce the compiler to compile the code
-         * after the loop, we encode the branch profile index in the branch.backwards instruction
-         * and use it here to force the false profile to a non-zero value.
-         */
-        InstructionImmediate branchProfile = parent.model.branchBackwardInstruction.findImmediate(ImmediateKind.BRANCH_PROFILE, "loop_header_branch_profile");
-        b.declaration(type(int.class), "branchProfileIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", branchProfile));
-        b.startStatement().startCall("ensureFalseProfile").tree(BytecodeRootNodeElement.uncheckedCast(arrayOf(type(int.class)), "this.branchProfiles_")).string("branchProfileIndex").end(2);
-
-        b.startReturn();
-        b.startStaticCall(types.BytecodeOSRNode, "tryOSR");
-        b.string("this");
-        String bci = BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.BYTECODE_INDEX)).toString();
-        b.string(parent.encodeState(bci, "sp", parent.model.hasYieldOperation() ? "frame != " + parent.localFrame() : null));
-        b.string("null"); // interpreterState
-        b.string("null"); // beforeTransfer
-        b.string("frame"); // parentFrame
-        b.end(); // static call
-        b.end(); // return
-
-        b.end(); // if pollOSRBackEdge
-
-        b.statement("return null");
-        return method;
-
-    }
-
-    static void emitCopyStackToLocalFrameBeforeYield(CodeTreeBuilder b, InstructionModel instr) {
-        b.statement("int maxLocals = getRoot().maxLocals");
-        /*
-         * The yield result will be stored at sp + stackEffect - 1 = sp + (1 - n) - 1 = sp - n (for
-         * n dynamic operands). We need to copy operands lower on the stack for resumption.
-         */
-        String yieldResultIndex = (instr.signature.dynamicOperandCount == 0) ? "sp" : "sp - " + instr.signature.dynamicOperandCount;
-        b.lineCommentf("The yield result will be stored at %s. The operands below it need to be preserved for resumption.", yieldResultIndex);
-        b.lineCommentf("These operands belong to the interval [maxLocals, %s).", yieldResultIndex);
-        b.startIf().string("maxLocals < " + yieldResultIndex).end().startBlock();
-        b.statement(BytecodeRootNodeElement.copyFrameTo("frame", "maxLocals", "localFrame", "maxLocals", yieldResultIndex + " - maxLocals"));
-        b.end();
-    }
-
-    private boolean localAccessNeedsLocalTags(InstructionModel instr) {
+    boolean localAccessNeedsLocalTags(InstructionModel instr) {
         // Local tags are only used for cached interpreters with BE. They need to be read
         // separately for materialized accesses, not passed into the method.
         return !instr.kind.isLocalVariableMaterializedAccess() && parent.model.usesBoxingElimination() && tier.isCached();
     }
 
-    private CodeTree readLocalTagsFastPath() {
+    CodeTree readLocalTagsFastPath() {
         return BytecodeRootNodeElement.uncheckedCast(type(byte[].class), "this.localTags_");
-    }
-
-    /**
-     * Helper that emits common validation code for materialized local reads/writes.
-     * <p>
-     * If {@code localRootVariable} or {@code bytecodeNodeVariable} are provided, declares and
-     * initializes locals with those names.
-     */
-    private void emitValidateMaterializedAccess(CodeTreeBuilder b, String frame, String localRootIndex, String localRootVariable, String bytecodeNodeVariable, String localIndex) {
-        CodeTree getRoot = CodeTreeBuilder.createBuilder() //
-                        .startCall("this.getRoot().getBytecodeRootNodeImpl") //
-                        .string(localRootIndex) //
-                        .end() //
-                        .build();
-        if (localRootVariable != null) {
-            b.declaration(parent.asType(), localRootVariable, getRoot);
-            getRoot = CodeTreeBuilder.singleString(localRootVariable);
-        }
-
-        b.startIf().tree(getRoot).string(".getFrameDescriptor() != ", frame, ".getFrameDescriptor()");
-        b.end().startBlock();
-        BytecodeRootNodeElement.emitThrowIllegalArgumentException(b, "Materialized frame belongs to the wrong root node.");
-        b.end();
-
-        CodeTree getBytecode = CodeTreeBuilder.createBuilder() //
-                        .tree(getRoot) //
-                        .string(".getBytecodeNodeImpl()") //
-                        .end() //
-                        .build();
-        if (bytecodeNodeVariable != null) {
-            b.declaration(parent.abstractBytecodeNode.asType(), bytecodeNodeVariable, getBytecode);
-            getBytecode = CodeTreeBuilder.singleString(bytecodeNodeVariable);
-        }
-        /**
-         * Check that the local is live at the current bci. We can only perform this check when the
-         * bci is stored in the frame.
-         */
-        if (parent.model.enableBlockScoping && parent.model.storeBciInFrame && localIndex != null) {
-            b.startAssert().startCall(getBytecode, "validateLocalLivenessInternal");
-            b.string(frame);
-            b.string("slot");
-            b.string(localIndex);
-            b.string("frame");
-            b.string("bci");
-            b.end(2);
-        }
-
     }
 
     /**
@@ -3955,11 +2224,10 @@ final class BytecodeNodeElement extends AbstractElement {
      * operation with which the compiler can match and eliminate subsequent "unbox" operations.
      */
     private CodeExecutableElement createLoadConstantCompiled() {
-        CodeExecutableElement ex = new CodeExecutableElement(Set.of(PRIVATE), type(void.class), "loadConstantCompiled");
+        CodeExecutableElement ex = new CodeExecutableElement(Set.of(PRIVATE), type(Object.class), "loadConstantCompiled");
         ex.addParameter(new CodeVariableElement(types.FrameWithoutBoxing, "frame"));
         ex.addParameter(new CodeVariableElement(type(byte[].class), "bc"));
         ex.addParameter(new CodeVariableElement(type(int.class), "bci"));
-        ex.addParameter(new CodeVariableElement(type(int.class), "sp"));
 
         CodeTreeBuilder b = ex.createBuilder();
         InstructionImmediate constant = parent.model.loadConstantInstruction.getImmediate(ImmediateKind.CONSTANT);
@@ -3972,11 +2240,12 @@ final class BytecodeNodeElement extends AbstractElement {
             char boundVariable = className.toLowerCase().charAt(0);
             b.string("constant instanceof " + className + " " + boundVariable);
             b.end().startBlock();
-            b.statement(BytecodeRootNodeElement.setFrameObject("sp", boundVariable + "." + getterMethods[i] + "()"));
-            b.statement("return");
+            b.statement("return ", boundVariable + "." + getterMethods[i] + "()");
             b.end();
         }
-        b.statement(BytecodeRootNodeElement.setFrameObject("sp", "constant"));
+        b.startElseBlock();
+        b.statement("return constant");
+        b.end();
 
         return ex;
     }
@@ -4105,134 +2374,10 @@ final class BytecodeNodeElement extends AbstractElement {
         return ensureFalseProfile;
     }
 
-    private void emitCustomHandler(CodeTreeBuilder b, InstructionModel instr) throws AssertionError {
-        List<CodeVariableElement> extraParams = createExtraParameters();
-        boolean isCustomYield = instr.operation.kind == OperationKind.CUSTOM_YIELD;
-        // Since an instruction produces at most one value, stackEffect is at most 1.
-        int stackEffect = instr.getStackEffect();
-
-        if (BytecodeRootNodeElement.isStoreBciBeforeExecute(parent.model, tier, instr)) {
-            storeBciInFrame(b);
-        }
-
-        TypeMirror cachedType = BytecodeRootNodeElement.getCachedDataClassType(instr);
-
-        if (tier.isCached()) {
-            // If not in the uncached interpreter, we need to retrieve the node for the call.
-            if (instr.canUseNodeSingleton()) {
-                b.startDeclaration(cachedType, "node").staticReference(cachedType, "SINGLETON").end();
-            } else {
-                CodeTree nodeIndex = BytecodeRootNodeElement.readImmediate("bc", "bci", instr.getImmediate(ImmediateKind.NODE_PROFILE));
-                CodeTree readNode = CodeTreeBuilder.createBuilder().tree(parent.readNodeProfile(cachedType, nodeIndex)).build();
-                b.declaration(cachedType, "node", readNode);
-            }
-        }
-
-        if (isCustomYield) {
-            emitCopyStackToLocalFrameBeforeYield(b, instr);
-        }
-
-        boolean unexpectedValue = BytecodeRootNodeElement.hasUnexpectedExecuteValue(instr);
-        if (unexpectedValue) {
-            b.startTryBlock();
-        }
-
-        buildCallExecute(b, instr, null, extraParams);
-
-        if (instr.nonNull && !instr.signature.isVoid) {
-            b.startStatement().startStaticCall(type(Objects.class), "requireNonNull");
-            b.string("result").doubleQuote("The operation " + instr.operation.name + " must return a non-null value, but did return a null value.");
-            b.end().end();
-        }
-
-        // Update the stack.
-        if (!instr.signature.isVoid) {
-            b.startStatement();
-            if (instr.isReturnTypeQuickening()) {
-                BytecodeRootNodeElement.startSetFrame(b, instr.signature.returnType);
-            } else {
-                BytecodeRootNodeElement.startSetFrame(b, type(Object.class));
-            }
-
-            b.string("frame");
-            if (stackEffect == 1) {
-                b.string("sp");
-            } else {
-                b.string("sp - " + (1 - stackEffect));
-            }
-            b.string("result");
-            b.end(); // setFrame
-            b.end(); // statement
-        }
-
-        if (unexpectedValue) {
-            b.end().startCatchBlock(types.UnexpectedResultException, "ex");
-            b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
-
-            if (isBoxingOverloadReturnTypeQuickening(instr)) {
-                InstructionModel generic = instr.quickeningBase.findGenericInstruction();
-                if (generic == instr) {
-                    throw new AssertionError("Unexpected generic instruction.");
-                }
-                parent.emitQuickening(b, "this", "bc", "bci", null, parent.createInstructionConstant(generic));
-            }
-
-            if (!instr.signature.isVoid) {
-                b.startStatement();
-                BytecodeRootNodeElement.startSetFrame(b, type(Object.class));
-                b.string("frame");
-                if (stackEffect == 1) {
-                    b.string("sp");
-                } else {
-                    b.string("sp - " + (1 - stackEffect));
-                }
-                b.string("ex.getResult()");
-                b.end(); // setFrame
-                b.end(); // statement
-            }
-            b.end(); // catch
-        }
-
-        // When stackEffect is negative, values should be cleared from the top of the
-        // stack.
-        InstructionModel quickeningRoot = instr.getQuickeningRoot();
-        int operandIndex = 0;
-        for (int i = stackEffect; i < 0; i++) {
-            TypeMirror genericType = quickeningRoot.signature.operandTypes.get(operandIndex);
-            if (ElementUtils.isPrimitive(genericType)) {
-                /*
-                 * If the generic type is primitive we can omit clearing in the interpreter, as the
-                 * clear is only needed for liveness in the compiler. Currently, we can't do that
-                 * for specialized quickenings as we might miss quickeninging reference types on the
-                 * stack if executeAndSpecialize is called. In the future when we keep all stack
-                 * effects in this method we be able to do better and avoid clearing also for
-                 * quickenings.
-                 */
-                b.startIf().startStaticCall(types.CompilerDirectives, "inCompiledCode").end().end().startBlock();
-                b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - " + -i));
-                b.end();
-            } else {
-                b.statement(BytecodeRootNodeElement.clearFrame("frame", "sp - " + -i));
-            }
-            operandIndex++;
-        }
-    }
-
-    private void storeBciInFrame(CodeTreeBuilder b) {
+    void storeBciInFrame(CodeTreeBuilder b) {
         if (BytecodeRootNodeElement.isStoreBciEnabled(parent.model, tier)) {
             BytecodeRootNodeElement.storeBciInFrame(b, parent.localFrame(), "bci");
         }
-    }
-
-    static boolean isBoxingOverloadReturnTypeQuickening(InstructionModel instr) {
-        if (!instr.isReturnTypeQuickening()) {
-            return false;
-        }
-        SpecializationData specialization = instr.resolveSingleSpecialization();
-        if (specialization == null) { // multiple specializations handled
-            return false;
-        }
-        return specialization.getBoxingOverloads().size() > 0;
     }
 
     static void emitCustomStackEffect(CodeTreeBuilder continueAtBuilder, int stackEffect) {
@@ -4241,64 +2386,6 @@ final class BytecodeNodeElement extends AbstractElement {
         } else if (stackEffect < 0) {
             continueAtBuilder.statement("sp -= " + -stackEffect);
         }
-    }
-
-    private List<CodeVariableElement> createExtraParameters() {
-        return List.of(
-                        new CodeVariableElement(type(byte[].class), "bc"),
-                        new CodeVariableElement(type(int.class), "bci"),
-                        new CodeVariableElement(type(int.class), "sp"));
-    }
-
-    private void buildCallExecute(CodeTreeBuilder b, InstructionModel instr, String evaluatedArg, List<CodeVariableElement> extraParams) {
-        boolean isVoid = instr.signature.isVoid;
-        TypeMirror cachedType = BytecodeRootNodeElement.getCachedDataClassType(instr);
-
-        b.startStatement();
-        if (!isVoid) {
-            b.type(instr.signature.returnType);
-            b.string(" result = ");
-        }
-        if (tier.isUncached()) {
-            b.staticReference(cachedType, "UNCACHED").startCall(".executeUncached");
-        } else {
-            b.startCall("node", BytecodeRootNodeElement.executeMethodName(instr));
-        }
-
-        // If we support yield, the frame forwarded to specializations should be the local frame
-        // and not the stack frame.
-        b.string(parent.localFrame());
-
-        if (evaluatedArg != null) {
-            b.string(evaluatedArg);
-        } else if (tier.isUncached()) {
-            // The uncached version takes all of its parameters. Other versions compute them.
-            for (ConstantOperandModel constantOperand : instr.operation.constantOperands.before()) {
-                b.tree(parent.readConstantImmediate("bc", "bci", "this", instr.constantOperandImmediates.get(constantOperand), constantOperand.type()));
-            }
-
-            for (int i = 0; i < instr.signature.dynamicOperandCount; i++) {
-                TypeMirror targetType = instr.signature.getDynamicOperandType(i);
-                b.startGroup();
-                if (!ElementUtils.isObject(targetType)) {
-                    b.cast(targetType);
-                }
-                b.string(BytecodeRootNodeElement.uncheckedGetFrameObject("sp - " + (instr.signature.dynamicOperandCount - i)));
-                b.end();
-            }
-
-            for (ConstantOperandModel constantOperand : instr.operation.constantOperands.after()) {
-                b.tree(parent.readConstantImmediate("bc", "bci", "this", instr.constantOperandImmediates.get(constantOperand), constantOperand.type()));
-            }
-        }
-
-        if (parent.model.hasYieldOperation()) {
-            b.string("frame"); // passed for $stackFrame
-        }
-        b.string("this");
-        b.variables(extraParams);
-        b.end(); // call
-        b.end(); // statement
     }
 
     private static void emitReturnTopOfStack(CodeTreeBuilder b) {

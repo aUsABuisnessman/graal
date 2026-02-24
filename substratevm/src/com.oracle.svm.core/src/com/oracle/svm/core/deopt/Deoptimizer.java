@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core.deopt;
 
-import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+import static com.oracle.svm.guest.staging.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 import static com.oracle.svm.core.stack.JavaFrameAnchors.verifyTopFrameAnchor;
 
 import java.lang.annotation.ElementType;
@@ -40,13 +40,14 @@ import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.c.function.CodePointer;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
+import org.graalvm.word.impl.Word;
 import org.graalvm.word.WordBase;
 
 import com.oracle.svm.core.FrameAccess;
 import com.oracle.svm.core.Isolates;
 import com.oracle.svm.core.NeverInline;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.guest.staging.Uninterruptible;
 import com.oracle.svm.core.code.CodeInfo;
 import com.oracle.svm.core.code.CodeInfoAccess;
 import com.oracle.svm.core.code.CodeInfoQueryResult;
@@ -83,7 +84,7 @@ import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.thread.VMThreads;
 import com.oracle.svm.core.util.PointerUtils;
 import com.oracle.svm.core.util.TimeUtils;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.replacements.Fold;
 import jdk.graal.compiler.core.common.NumUtil;
@@ -91,8 +92,7 @@ import jdk.graal.compiler.core.common.util.TypeConversion;
 import jdk.graal.compiler.lir.asm.FrameContext;
 import jdk.graal.compiler.nodes.UnreachableNode;
 import jdk.graal.compiler.options.Option;
-import jdk.graal.compiler.word.BarrieredAccess;
-import jdk.graal.compiler.word.Word;
+import org.graalvm.word.impl.BarrieredAccess;
 import jdk.vm.ci.code.InstalledCode;
 import jdk.vm.ci.meta.DeoptimizationAction;
 import jdk.vm.ci.meta.DeoptimizationReason;
@@ -894,7 +894,7 @@ public final class Deoptimizer {
 
     /**
      * The handler for lazy deoptimization.
-     * 
+     *
      * Despite being marked Uninterruptible, this contains interruptible sections when we look up
      * the code info, and construct the {@link DeoptimizedFrame}.
      */

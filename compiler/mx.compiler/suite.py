@@ -28,7 +28,18 @@ suite = {
       {
         "name" : "sdk",
         "subdir": True
-      }
+      },
+      # dynamic import for the 'barista' bench suite
+      {
+        "name": "barista",
+        "subdir": False,
+        "version": "0.6.5",
+        "foreign": True, # barista is not an mx suite
+        "dynamic": True,
+        "urls": [
+          {"url": "https://github.com/barista-benchmarks/barista.git", "kind" : "git"},
+        ],
+      },
     ]
   },
 
@@ -360,6 +371,7 @@ suite = {
         ],
         "jdk.internal.vm.ci": [
           "jdk.vm.ci.meta",
+          "jdk.vm.ci.meta.annotation",
           "jdk.vm.ci.runtime",
           "jdk.vm.ci.code",
         ],
@@ -558,8 +570,10 @@ suite = {
       "distDependencies" : [
         "GRAAL",
         "GRAAL_TEST_COMPILETIME",
+        "HSDIS_LIBRARY",
         "truffle:TRUFFLE_SL_TEST",
         "truffle:TRUFFLE_TEST",
+        "truffle:TRUFFLE_API",
         "truffle:TRUFFLE_COMPILER",
         "truffle:TRUFFLE_RUNTIME",
       ],
@@ -817,6 +831,43 @@ suite = {
       "testDistribution" : True,
       "maven": False,
       "graalCompilerSourceEdition": "ignore",
+    },
+
+    "HSDIS_LIBRARY" : {
+      "native" : True,
+      "type" : "jar",
+      "description" : "Disassembler support distribution for the GraalVM",
+      "os_arch" : {
+        "linux" : {
+          "riscv64" : {
+            "optional" : True,
+          },
+          "<others>" : {
+            "layout" : {
+              "libhsdis-<arch>.so" : "file:<path:HSDIS>/*",
+            },
+          },
+        },
+        "darwin" : {
+          "<others>" : {
+            "layout" : {
+              "libhsdis-<arch>.dylib" : "file:<path:HSDIS>/*",
+            },
+          },
+        },
+        "<others>" : {
+          "amd64" : {
+            "layout" : {
+              "<libsuffix:hsdis-amd64>" : "file:<path:HSDIS>/*",
+            },
+          },
+          "aarch64" : {
+            "layout" : {
+              "<libsuffix:hsdis-aarch64>" : "file:<path:HSDIS>/*",
+            },
+          },
+        },
+      },
     },
 
     "HSDIS_GRAALVM_SUPPORT" : {

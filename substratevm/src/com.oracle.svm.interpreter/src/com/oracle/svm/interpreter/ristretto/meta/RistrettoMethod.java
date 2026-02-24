@@ -26,20 +26,29 @@ package com.oracle.svm.interpreter.ristretto.meta;
 
 import java.util.function.Function;
 
+import org.graalvm.nativeimage.c.function.CFunctionPointer;
+
+import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.core.SubstrateUtil;
+import com.oracle.svm.graal.meta.SubstrateInstalledCodeImpl;
 import com.oracle.svm.graal.meta.SubstrateMethod;
 import com.oracle.svm.graal.meta.SubstrateType;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaMethod;
+import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaType;
 import com.oracle.svm.interpreter.metadata.profile.MethodProfile;
 import com.oracle.svm.interpreter.ristretto.RistrettoConstants;
 import com.oracle.svm.interpreter.ristretto.RistrettoUtils;
+import com.oracle.svm.interpreter.ristretto.profile.RistrettoProfilingInfo;
 
 import jdk.graal.compiler.nodes.extended.MembarNode;
-import jdk.vm.ci.code.InstalledCode;
 import jdk.vm.ci.meta.ConstantPool;
 import jdk.vm.ci.meta.ExceptionHandler;
+import jdk.vm.ci.meta.JavaType;
 import jdk.vm.ci.meta.LineNumberTable;
 import jdk.vm.ci.meta.LocalVariableTable;
+import jdk.vm.ci.meta.ProfilingInfo;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
+import jdk.vm.ci.meta.ResolvedJavaType;
 import jdk.vm.ci.meta.Signature;
 
 /**
@@ -57,6 +66,17 @@ import jdk.vm.ci.meta.Signature;
 public final class RistrettoMethod extends SubstrateMethod {
     private final InterpreterResolvedJavaMethod interpreterMethod;
     private RistrettoConstantPool ristrettoConstantPool;
+    /**
+     * Cached exception handlers for this method. Propagated the first time
+     * {@link #getExceptionHandlers()} is called.
+     */
+    private volatile ExceptionHandler[] rHandlers;
+
+    /**
+     * Link to the original SubstrateMethod built at image-build time, if it exists. Can be
+     * {@code null}.
+     */
+    private volatile SubstrateMethod originalRuntimeMethod;
 
     // JIT COMPILER SUPPORT START
     /**
@@ -78,23 +98,34 @@ public final class RistrettoMethod extends SubstrateMethod {
      * <p>
      * TODO - deoptimization and retirement of this pointer not implemented yet.
      */
-    public volatile InstalledCode installedCode;
+    public volatile SubstrateInstalledCodeImpl installedCode;
     // JIT COMPILER SUPPORT END
 
     private RistrettoMethod(InterpreterResolvedJavaMethod interpreterMethod) {
         super(0, null, 0, null, 0, null);
         this.interpreterMethod = interpreterMethod;
-        this.declaringClass = RistrettoType.create(interpreterMethod.getDeclaringClass());
+        this.declaringClass = RistrettoType.getOrCreate(interpreterMethod.getDeclaringClass());
         this.signature = new RistrettoUnresolvedSignature(interpreterMethod.getSignature());
+        /*
+         * TODO GR-34928 / GR-70938 - Setup indirectCallTarget for miranda and overpass methods.
+         */
+        this.indirectCallTarget = this;
+        this.vTableIndex = interpreterMethod.getVTableIndex();
     }
 
+    @Override
+    public boolean hasImageCodeOffset() {
+        return RistrettoUtils.wasAOTCompiled(interpreterMethod);
+    }
+
+    @Override
     public InterpreterResolvedJavaMethod getInterpreterMethod() {
         return interpreterMethod;
     }
 
     private static final Function<InterpreterResolvedJavaMethod, ResolvedJavaMethod> RISTRETTO_METHOD_FUNCTION = RistrettoMethod::new;
 
-    public static RistrettoMethod create(InterpreterResolvedJavaMethod interpreterMethod) {
+    public static RistrettoMethod getOrCreate(InterpreterResolvedJavaMethod interpreterMethod) {
         return (RistrettoMethod) interpreterMethod.getRistrettoMethod(RISTRETTO_METHOD_FUNCTION);
     }
 
@@ -105,13 +136,24 @@ public final class RistrettoMethod extends SubstrateMethod {
         return profile;
     }
 
+    @Override
+    public ProfilingInfo getProfilingInfo() {
+        return new RistrettoProfilingInfo(getProfile());
+    }
+
+    @Override
+    public ProfilingInfo getProfilingInfo(boolean includeNormal, boolean includeOSR) {
+        // TODO GR-71494 - OSR support
+        return getProfilingInfo();
+    }
+
     /**
      * Allocate the profile once per method. Apart from test scenarios the profile is never set to
      * null again. Thus, the heavy locking code below is normally not run in a fast path.
      */
     private synchronized void initializeProfile() {
         if (profile == null) {
-            MethodProfile newProfile = new MethodProfile(this);
+            MethodProfile newProfile = new MethodProfile(this, RistrettoType.RISTRETTO_TYPE_FUNCTION);
             // ensure everything is allocated and initialized before we signal the barrier
             // for the publishing write
             MembarNode.memoryBarrier(MembarNode.FenceKind.STORE_STORE);
@@ -131,6 +173,11 @@ public final class RistrettoMethod extends SubstrateMethod {
             return RistrettoUtils.runtimeBytecodesAvailable(this.getInterpreterMethod());
         }
         return false;
+    }
+
+    @Override
+    public boolean canBeStaticallyBound() {
+        return interpreterMethod.canBeStaticallyBound();
     }
 
     @Override
@@ -178,7 +225,28 @@ public final class RistrettoMethod extends SubstrateMethod {
 
     @Override
     public ExceptionHandler[] getExceptionHandlers() {
-        return interpreterMethod.getExceptionHandlers();
+        if (rHandlers == null) {
+            synchronized (this) {
+                if (rHandlers == null) {
+                    ExceptionHandler[] iHandlers = interpreterMethod.getExceptionHandlers();
+                    ExceptionHandler[] effectiveRHandlers = new ExceptionHandler[iHandlers.length];
+                    for (int i = 0; i < iHandlers.length; i++) {
+                        final ExceptionHandler iHandler = iHandlers[i];
+                        final JavaType catchType = iHandler.getCatchType();
+                        if (catchType instanceof ResolvedJavaType) {
+                            assert catchType instanceof InterpreterResolvedJavaType;
+                            InterpreterResolvedJavaType iCatchType = (InterpreterResolvedJavaType) catchType;
+                            RistrettoType rType = RistrettoType.getOrCreate(iCatchType);
+                            effectiveRHandlers[i] = new ExceptionHandler(iHandler.getStartBCI(), iHandler.getEndBCI(), iHandler.getHandlerBCI(), iHandler.catchTypeCPI(), rType);
+                        } else {
+                            effectiveRHandlers[i] = iHandler;
+                        }
+                    }
+                    rHandlers = effectiveRHandlers;
+                }
+            }
+        }
+        return rHandlers;
     }
 
     @Override
@@ -193,7 +261,7 @@ public final class RistrettoMethod extends SubstrateMethod {
 
     @Override
     public SubstrateType getDeclaringClass() {
-        return RistrettoType.create(interpreterMethod.getDeclaringClass());
+        return RistrettoType.getOrCreate(interpreterMethod.getDeclaringClass());
     }
 
     @Override
@@ -281,4 +349,26 @@ public final class RistrettoMethod extends SubstrateMethod {
         return interpreterMethod.isConcrete();
     }
 
+    @Override
+    public CFunctionPointer getAOTEntrypoint() {
+        assert !SubstrateUtil.HOSTED;
+        assert SubstrateOptions.useRistretto();
+        assert interpreterMethod.hasNativeEntryPoint();
+        return interpreterMethod.getNativeEntryPoint();
+    }
+
+    public SubstrateMethod getOriginalRuntimeMethod() {
+        return originalRuntimeMethod;
+    }
+
+    public void setOriginalRuntimeMethod(SubstrateMethod sMethod) {
+        assert originalRuntimeMethod == null;
+        if (originalRuntimeMethod == null) {
+            synchronized (this) {
+                if (originalRuntimeMethod == null) {
+                    originalRuntimeMethod = sMethod;
+                }
+            }
+        }
+    }
 }

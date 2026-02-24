@@ -24,22 +24,22 @@
  */
 package com.oracle.svm.core.genscavenge;
 
-import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+import static com.oracle.svm.guest.staging.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
 import org.graalvm.nativeimage.c.struct.RawField;
 import org.graalvm.nativeimage.c.struct.RawStructure;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
+import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.core.AlwaysInline;
-import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.guest.staging.Uninterruptible;
 import com.oracle.svm.core.genscavenge.remset.RememberedSet;
 import com.oracle.svm.core.heap.ObjectVisitor;
 import com.oracle.svm.core.util.PointerUtils;
 
 import jdk.graal.compiler.api.directives.GraalDirectives;
 import jdk.graal.compiler.api.replacements.Fold;
-import jdk.graal.compiler.word.Word;
 
 /**
  * An AlignedHeapChunk can hold many Objects.

@@ -25,7 +25,7 @@
 package com.oracle.svm.hosted.option;
 
 import static com.oracle.svm.common.option.CommonOptionParser.BooleanOptionFormat.PLUS_MINUS;
-import static com.oracle.svm.core.util.VMError.shouldNotReachHere;
+import static com.oracle.svm.shared.util.VMError.shouldNotReachHere;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -60,17 +60,12 @@ public class HostedOptionParser implements HostedOptionProvider {
 
     @SuppressWarnings("hiding")
     public HostedOptionParser(ClassLoader imageClassLoader, List<String> arguments) {
-        /* Collect options. */
         EconomicMap<String, OptionDescriptor> allHostedOptions = EconomicMap.create();
         EconomicMap<String, OptionDescriptor> allRuntimeOptions = EconomicMap.create();
         collectOptions(OptionsContainer.getDiscoverableOptions(imageClassLoader), allHostedOptions, allRuntimeOptions);
 
-        EconomicMap<String, OptionDescriptor> allOptions = EconomicMap.create(allHostedOptions);
-        allOptions.putAll(allRuntimeOptions);
-
-        /* Write fields. */
         this.arguments = Collections.unmodifiableList(arguments);
-        this.allOptions = allOptions;
+        this.allOptions = mergeOptions(allHostedOptions, allRuntimeOptions);
         this.allHostedOptions = allHostedOptions;
         this.allRuntimeOptions = allRuntimeOptions;
     }
@@ -100,6 +95,20 @@ public class HostedOptionParser implements HostedOptionProvider {
         });
     }
 
+    private static EconomicMap<String, OptionDescriptor> mergeOptions(EconomicMap<String, OptionDescriptor> allHostedOptions, EconomicMap<String, OptionDescriptor> allRuntimeOptions) {
+        EconomicMap<String, OptionDescriptor> allOptions = EconomicMap.create(allHostedOptions);
+        var runtimeOptionCursor = allRuntimeOptions.getEntries();
+        while (runtimeOptionCursor.advance()) {
+            String name = runtimeOptionCursor.getKey();
+            OptionDescriptor newDesc = runtimeOptionCursor.getValue();
+            OptionDescriptor existingDesc = allOptions.put(name, newDesc);
+            if (existingDesc != null && newDesc != existingDesc) {
+                throw shouldNotReachHere("Option name \"" + name + "\" has multiple definitions: " + existingDesc.getLocation() + " and " + newDesc.getLocation());
+            }
+        }
+        return allOptions;
+    }
+
     public List<String> parse() {
         List<String> remainingArgs = new ArrayList<>();
         EconomicSet<String> errors = EconomicSet.create();
@@ -123,17 +132,6 @@ public class HostedOptionParser implements HostedOptionProvider {
             throw UserError.abort(errors);
         }
 
-        /*
-         * We cannot prevent that runtime-only options are accessed during native image generation.
-         * However, we set these options to null here, so that at least they do not have a sensible
-         * value.
-         */
-        for (OptionDescriptor descriptor : allRuntimeOptions.getValues()) {
-            if (!allHostedOptions.containsKey(descriptor.getName())) {
-                hostedValues.put(descriptor.getOptionKey(), null);
-            }
-        }
-
         return remainingArgs;
     }
 
@@ -149,7 +147,6 @@ public class HostedOptionParser implements HostedOptionProvider {
         } else if (arg.startsWith(SubstrateOptionsParser.RUNTIME_OPTION_PREFIX)) {
             /* Only run-time options can be set via -R:<OptionName>. */
             OptionParseResult result = SubstrateOptionsParser.parseHostedOption(SubstrateOptionsParser.RUNTIME_OPTION_PREFIX, allRuntimeOptions, runtimeValues, PLUS_MINUS, arg);
-            /* Only print non-SVM run-time options (SVM options are already printed above). */
             maybePrintOptions(result, SubstrateOptionsParser.RUNTIME_OPTION_PREFIX, allRuntimeOptions, true);
             return result;
         }

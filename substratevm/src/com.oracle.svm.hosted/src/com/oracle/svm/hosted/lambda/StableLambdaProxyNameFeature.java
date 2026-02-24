@@ -31,10 +31,9 @@ import com.oracle.graal.pointsto.meta.BaseLayerType;
 import com.oracle.svm.core.SubstrateUtil;
 import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
-import com.oracle.svm.core.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.core.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.core.traits.SingletonLayeredInstallationKind.Independent;
-import com.oracle.svm.core.traits.SingletonTraits;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.hosted.FeatureImpl.AfterAnalysisAccessImpl;
 import com.oracle.svm.hosted.FeatureImpl.DuringSetupAccessImpl;
 
@@ -44,7 +43,7 @@ import org.graalvm.collections.EconomicSet;
 /**
  * @see LambdaProxyRenamingSubstitutionProcessor
  */
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Independent.class)
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class)
 @AutomaticallyRegisteredFeature
 public final class StableLambdaProxyNameFeature implements InternalFeature {
 

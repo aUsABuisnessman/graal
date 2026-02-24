@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core.graal.amd64;
 
-import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+import static com.oracle.svm.guest.staging.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 import static jdk.vm.ci.amd64.AMD64.rax;
 import static jdk.vm.ci.amd64.AMD64.rsp;
 import static jdk.vm.ci.amd64.AMD64.xmm0;
@@ -40,27 +40,27 @@ import org.graalvm.word.Pointer;
 import org.graalvm.word.PointerBase;
 
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.guest.staging.Uninterruptible;
 import com.oracle.svm.core.c.struct.OffsetOf;
 import com.oracle.svm.core.config.ConfigurationValues;
 import com.oracle.svm.core.deopt.DeoptimizationSlotPacking;
 import com.oracle.svm.core.graal.code.InterpreterAccessStubData;
 import com.oracle.svm.core.graal.code.PreparedArgumentType;
 import com.oracle.svm.core.graal.meta.SubstrateRegisterConfig;
+import com.oracle.svm.core.jdk.UninterruptibleUtils;
 import com.oracle.svm.core.meta.SharedMethod;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.replacements.Fold;
 import jdk.graal.compiler.asm.Label;
 import jdk.graal.compiler.asm.amd64.AMD64Address;
 import jdk.graal.compiler.asm.amd64.AMD64Assembler;
 import jdk.graal.compiler.asm.amd64.AMD64MacroAssembler;
-import jdk.graal.compiler.core.common.NumUtil;
 import jdk.graal.compiler.lir.asm.CompilationResultBuilder;
-import jdk.graal.compiler.word.Word;
 import jdk.vm.ci.amd64.AMD64;
 import jdk.vm.ci.code.CallingConvention;
 import jdk.vm.ci.code.Register;
+import org.graalvm.word.impl.Word;
 
 public class AMD64InterpreterStubs {
 
@@ -68,8 +68,6 @@ public class AMD64InterpreterStubs {
         return new SubstrateAMD64RegisterConfig(SubstrateRegisterConfig.ConfigKind.NORMAL, null, ConfigurationValues.getTarget(),
                         SubstrateOptions.PreserveFramePointer.getValue());
     }
-
-    public static final Register TRAMPOLINE_ARGUMENT = AMD64.rax;
 
     public static class InterpreterEnterStubContext extends SubstrateAMD64Backend.SubstrateAMD64FrameContext {
 
@@ -86,7 +84,7 @@ public class AMD64InterpreterStubs {
         public void enter(CompilationResultBuilder crb) {
             AMD64MacroAssembler masm = (AMD64MacroAssembler) crb.asm;
 
-            Register trampArg = TRAMPOLINE_ARGUMENT;
+            Register trampArg = SubstrateAMD64Backend.HIDDEN_ARGUMENT_REGISTER;
             Register spCopy = AMD64.r11;
 
             masm.movq(spCopy, rsp);
@@ -264,8 +262,9 @@ public class AMD64InterpreterStubs {
         }
     }
 
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public static int sizeOfInterpreterData() {
-        return NumUtil.roundUp(SizeOf.get(InterpreterDataAMD64.class), 0x10);
+        return UninterruptibleUtils.NumUtil.roundUp(SizeOf.get(InterpreterDataAMD64.class), 0x10);
     }
 
     public static int additionalFrameSizeEnterStub() {
@@ -489,6 +488,7 @@ public class AMD64InterpreterStubs {
         }
 
         @Override
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
         public void setSp(Pointer data, int stackSize, Pointer stackBuffer) {
             VMError.guarantee(stackBuffer.isNonNull());
 
@@ -650,6 +650,7 @@ public class AMD64InterpreterStubs {
 
         @Override
         @Fold
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
         public int allocateStubDataSize() {
             return sizeOfInterpreterData();
         }

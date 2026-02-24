@@ -42,6 +42,7 @@ import java.util.stream.Collectors;
 
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.EconomicSet;
+import org.graalvm.nativeimage.ImageInfo;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.hosted.Feature;
 
@@ -58,16 +59,16 @@ import com.oracle.svm.core.option.HostedOptionKey;
 import com.oracle.svm.core.option.OptionOrigin;
 import com.oracle.svm.core.option.OptionUtils;
 import com.oracle.svm.core.option.SubstrateOptionsParser;
-import com.oracle.svm.core.util.VMError;
 import com.oracle.svm.driver.APIOptionHandler.HostedOptionInfo;
 import com.oracle.svm.driver.NativeImage.ArgumentQueue;
 import com.oracle.svm.hosted.FeatureImpl;
 import com.oracle.svm.hosted.option.HostedOptionParser;
+import com.oracle.svm.shared.util.ModuleSupport;
+import com.oracle.svm.shared.util.StringUtil;
+import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.util.LogUtils;
-import com.oracle.svm.util.ModuleSupport;
-import com.oracle.svm.util.ReflectionUtil;
-import com.oracle.svm.util.ReflectionUtil.ReflectionUtilError;
-import com.oracle.svm.util.StringUtil;
+import com.oracle.svm.shared.util.ReflectionUtil;
+import com.oracle.svm.shared.util.ReflectionUtil.ReflectionUtilError;
 
 import jdk.graal.compiler.options.OptionDescriptor;
 import jdk.graal.compiler.options.OptionDescriptors;
@@ -106,7 +107,7 @@ class APIOptionHandler extends NativeImage.OptionHandler<NativeImage> {
 
     APIOptionHandler(NativeImage nativeImage) {
         super(nativeImage);
-        if (NativeImage.IS_AOT) {
+        if (ImageInfo.inImageRuntimeCode()) {
             APIOptionSupport support = ImageSingletons.lookup(APIOptionSupport.class);
             groupInfos = support.groupInfos();
             pathOptions = support.pathOptions();

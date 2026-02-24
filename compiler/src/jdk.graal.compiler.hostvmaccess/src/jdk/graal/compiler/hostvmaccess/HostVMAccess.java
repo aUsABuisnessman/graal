@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,13 +24,20 @@
  */
 package jdk.graal.compiler.hostvmaccess;
 
+import java.lang.reflect.AccessibleObject;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
+import java.lang.reflect.Field;
 import java.lang.reflect.InaccessibleObjectException;
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Member;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.net.URL;
+import java.security.CodeSource;
+import java.security.ProtectionDomain;
+import java.util.stream.Stream;
 
 import jdk.graal.compiler.api.replacements.SnippetReflectionProvider;
 import jdk.graal.compiler.api.runtime.GraalJVMCICompiler;
@@ -40,13 +47,20 @@ import jdk.graal.compiler.phases.util.Providers;
 import jdk.graal.compiler.runtime.RuntimeProvider;
 import jdk.graal.compiler.vmaccess.InvocationException;
 import jdk.graal.compiler.vmaccess.ModuleSupport;
+import jdk.graal.compiler.vmaccess.ResolvedJavaModule;
+import jdk.graal.compiler.vmaccess.ResolvedJavaModuleLayer;
+import jdk.graal.compiler.vmaccess.ResolvedJavaPackage;
 import jdk.graal.compiler.vmaccess.VMAccess;
+import jdk.internal.loader.BootLoader;
+import jdk.vm.ci.meta.Constant;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
+import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
 import jdk.vm.ci.meta.Signature;
 import jdk.vm.ci.runtime.JVMCI;
+import jdk.vm.ci.runtime.JVMCIRuntime;
 
 /**
  * An implementation of {@link VMAccess} that reflects on the JVM it's currently running inside.
@@ -60,10 +74,13 @@ import jdk.vm.ci.runtime.JVMCI;
 final class HostVMAccess implements VMAccess {
     private final ClassLoader appClassLoader;
     private final Providers providers;
+    private final Module hostImplModule;
 
     HostVMAccess(ClassLoader appClassLoader) {
         this.appClassLoader = appClassLoader;
-        GraalRuntime graalRuntime = ((GraalJVMCICompiler) JVMCI.getRuntime().getCompiler()).getGraalRuntime();
+        JVMCIRuntime runtime = JVMCI.getRuntime();
+        this.hostImplModule = runtime.getClass().getModule();
+        GraalRuntime graalRuntime = ((GraalJVMCICompiler) runtime.getCompiler()).getGraalRuntime();
         Backend hostBackend = graalRuntime.getCapability(RuntimeProvider.class).getHostBackend();
         providers = hostBackend.getProviders();
     }
@@ -71,6 +88,21 @@ final class HostVMAccess implements VMAccess {
     @Override
     public Providers getProviders() {
         return providers;
+    }
+
+    @Override
+    public boolean owns(ResolvedJavaType value) {
+        return value.getClass().getModule() == hostImplModule;
+    }
+
+    @Override
+    public boolean owns(ResolvedJavaMethod value) {
+        return value.getClass().getModule() == hostImplModule;
+    }
+
+    @Override
+    public boolean owns(ResolvedJavaField value) {
+        return value.getClass().getModule() == hostImplModule;
     }
 
     @Override
@@ -98,7 +130,16 @@ final class HostVMAccess implements VMAccess {
             JavaKind parameterKind = signature.getParameterKind(i);
             JavaConstant argument = arguments[i];
             if (parameterKind.isObject()) {
-                unboxedArguments[i] = snippetReflection.asObject(parameterTypes[i], argument);
+                if (argument.isNull()) {
+                    unboxedArguments[i] = null;
+                } else {
+                    unboxedArguments[i] = snippetReflection.asObject(parameterTypes[i], argument);
+                    if (unboxedArguments[i] == null) {
+                        throw new IllegalArgumentException(
+                                        "Illegal argument type: arguments[" + i + "] of type " + providers.getMetaAccess().lookupJavaType(arguments[i]).toClassName() +
+                                                        " could not be converted to a " + parameterTypes[i]);
+                    }
+                }
             } else {
                 assert parameterKind.isPrimitive();
                 unboxedArguments[i] = argument.asBoxedPrimitive();
@@ -114,7 +155,16 @@ final class HostVMAccess implements VMAccess {
                 if (Modifier.isStatic(reflectionMethod.getModifiers())) {
                     unboxedReceiver = null;
                 } else {
-                    unboxedReceiver = snippetReflection.asObject(reflectionMethod.getDeclaringClass(), receiver);
+                    if (receiver.isNull()) {
+                        unboxedReceiver = null;
+                    } else {
+                        unboxedReceiver = snippetReflection.asObject(reflectionMethod.getDeclaringClass(), receiver);
+                        if (unboxedReceiver == null) {
+                            throw new IllegalArgumentException(
+                                            "Illegal argument type: receiver of type " + providers.getMetaAccess().lookupJavaType(receiver).toClassName() +
+                                                            " could not be converted to a " + reflectionMethod.getDeclaringClass());
+                        }
+                    }
                 }
                 JavaKind returnKind = method.getSignature().getReturnKind();
                 Object result = reflectionMethod.invoke(unboxedReceiver, unboxedArguments);
@@ -130,19 +180,64 @@ final class HostVMAccess implements VMAccess {
         } catch (InstantiationException e) {
             throw new IllegalArgumentException(e);
         } catch (InvocationTargetException e) {
-            throw new InvocationException(snippetReflection.forObject(e.getCause()), e);
+            throw new InvocationException(snippetReflection.forObject(e.getCause()), e.getCause());
         } catch (IllegalAccessException e) {
             throw new RuntimeException(e);
         }
     }
 
-    private static void makeAccessible(Executable executable) {
+    @Override
+    public void writeField(ResolvedJavaField field, JavaConstant receiver, JavaConstant value) {
+        SnippetReflectionProvider snippetReflection = providers.getSnippetReflection();
+        Field reflectionField = snippetReflection.originalField(field);
+        makeAccessible(reflectionField);
+        var fieldKind = field.getJavaKind();
+
+        if (Modifier.isStatic(reflectionField.getModifiers())) {
+            if (receiver != null) {
+                throw new IllegalArgumentException("For static fields, the receiver argument must be null");
+            }
+        } else if (receiver == null) {
+            throw new NullPointerException("For instance fields, the receiver argument must not be null");
+        } else if (receiver.isNull()) {
+            throw new IllegalArgumentException("For instance fields, the receiver argument must not represent a null constant");
+        }
+
+        Object unboxedValue;
+        if (fieldKind.isObject()) {
+            unboxedValue = snippetReflection.asObject(reflectionField.getType(), value);
+        } else {
+            assert fieldKind.isPrimitive();
+            if (fieldKind != value.getJavaKind()) {
+                throw new IllegalArgumentException("Expected value kind " + fieldKind + " but got " + value.getJavaKind());
+            }
+            unboxedValue = value.asBoxedPrimitive();
+        }
+
+        Object unboxedReceiver;
+        if (Modifier.isStatic(reflectionField.getModifiers())) {
+            unboxedReceiver = null;
+        } else {
+            unboxedReceiver = snippetReflection.asObject(reflectionField.getDeclaringClass(), receiver);
+        }
+
         try {
-            executable.setAccessible(true);
+            reflectionField.set(unboxedReceiver, unboxedValue);
+        } catch (IllegalAccessException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static <T extends AccessibleObject & Member> void makeAccessible(T accessibleMember) {
+        try {
+            if (!accessibleMember.isAccessible()) {
+                accessibleMember.setAccessible(true);
+            }
         } catch (InaccessibleObjectException e) {
-            Class<?> declaringClass = executable.getDeclaringClass();
+            Class<?> declaringClass = accessibleMember.getDeclaringClass();
             ModuleSupport.addOpens(HostVMAccess.class.getModule(), declaringClass.getModule(), declaringClass.getPackageName());
-            executable.setAccessible(true);
+            accessibleMember.setAccessible(true);
         }
     }
 
@@ -152,19 +247,124 @@ final class HostVMAccess implements VMAccess {
         Class<?> componentClass = snippetReflection.originalClass(componentType);
         Object array = Array.newInstance(componentClass, elements.length);
         for (int i = 0; i < elements.length; i++) {
-            JavaConstant argument = elements[i];
-            if (argument.getJavaKind().isObject()) {
-                Array.set(array, i, snippetReflection.asObject(Object.class, argument));
-            } else {
-                Array.set(array, i, argument.asBoxedPrimitive());
-            }
+            doWriteArrayElement(array, componentType, i, elements[i]);
         }
         return snippetReflection.forObject(array);
+    }
+
+    private void doWriteArrayElement(Object array, ResolvedJavaType componentType, int index, JavaConstant element) {
+        Object unwrappedValue;
+        if (componentType.isPrimitive()) {
+            if (componentType.getJavaKind() != element.getJavaKind()) {
+                throw new IllegalArgumentException("Element " + element + " should be a " + componentType.getJavaKind() + ", got " + element.getJavaKind());
+            }
+            unwrappedValue = element.asBoxedPrimitive();
+        } else {
+            if (!element.getJavaKind().isObject()) {
+                throw new IllegalArgumentException("Element " + element + " should be an object, got " + componentType);
+            }
+            unwrappedValue = providers.getSnippetReflection().asObject(Object.class, element);
+        }
+        Array.set(array, index, unwrappedValue);
+    }
+
+    @Override
+    public void writeArrayElement(JavaConstant array, int index, JavaConstant element) {
+        ResolvedJavaType arrayType = getProviders().getMetaAccess().lookupJavaType(array);
+        if (arrayType == null || !arrayType.isArray()) {
+            throw new IllegalArgumentException("Expected an array constant, got " + array);
+        }
+        Object asObject = providers.getSnippetReflection().asObject(Object.class, array);
+        if (asObject == null) {
+            throw new IllegalArgumentException("Could not unwrap array: " + array);
+        }
+        doWriteArrayElement(asObject, arrayType.getComponentType(), index, element);
+    }
+
+    @Override
+    public ResolvedJavaMethod asResolvedJavaMethod(Constant constant) {
+        SnippetReflectionProvider snippetReflection = providers.getSnippetReflection();
+        Executable executable = snippetReflection.asObject(Executable.class, (JavaConstant) constant);
+        if (executable != null) {
+            return providers.getMetaAccess().lookupJavaMethod(executable);
+        }
+        return null;
+    }
+
+    @Override
+    public JavaConstant asFieldConstant(ResolvedJavaField field) {
+        if (field.isInternal()) {
+            return null;
+        }
+        SnippetReflectionProvider snippetReflection = providers.getSnippetReflection();
+        return snippetReflection.forObject(snippetReflection.originalField(field));
+    }
+
+    @Override
+    public JavaConstant asExecutableConstant(ResolvedJavaMethod method) {
+        if (method.isClassInitializer()) {
+            return null;
+        }
+        SnippetReflectionProvider snippetReflection = providers.getSnippetReflection();
+        return snippetReflection.forObject(snippetReflection.originalMethod(method));
+    }
+
+    @Override
+    public ResolvedJavaField asResolvedJavaField(Constant constant) {
+        SnippetReflectionProvider snippetReflection = providers.getSnippetReflection();
+        Field field = snippetReflection.asObject(Field.class, (JavaConstant) constant);
+        if (field != null) {
+            return providers.getMetaAccess().lookupJavaField(field);
+        }
+        return null;
     }
 
     @Override
     public ResolvedJavaType lookupBootClassLoaderType(String name) {
         return lookupType(name, null);
+    }
+
+    @Override
+    public ResolvedJavaModule getModule(ResolvedJavaType type) {
+        return new HostVMResolvedJavaModuleImpl(getOriginalClass(type).getModule());
+    }
+
+    @Override
+    public ResolvedJavaPackage getPackage(ResolvedJavaType type) {
+        Package pkg = getOriginalClass(type).getPackage();
+        if (pkg == null) {
+            return null;
+        }
+        return new HostVMResolvedJavaPackageImpl(providers.getMetaAccess(), pkg);
+    }
+
+    private Class<?> getOriginalClass(ResolvedJavaType type) {
+        Class<?> originalClass = providers.getSnippetReflection().originalClass(type);
+        if (originalClass == null) {
+            throw new RuntimeException("No original class for type " + type);
+        }
+        return originalClass;
+    }
+
+    @Override
+    public Stream<ResolvedJavaPackage> bootLoaderPackages() {
+        return BootLoader.packages().map(p -> new HostVMResolvedJavaPackageImpl(providers.getMetaAccess(), p));
+    }
+
+    @Override
+    public ResolvedJavaModuleLayer bootModuleLayer() {
+        return new HostVMResolvedJavaModuleLayerImpl(ModuleLayer.boot());
+    }
+
+    @Override
+    public URL getCodeSourceLocation(ResolvedJavaType type) {
+        Class<?> originalClass = providers.getSnippetReflection().originalClass(type);
+        ProtectionDomain pd = originalClass.getProtectionDomain();
+        CodeSource cs = pd.getCodeSource();
+        if (cs == null) {
+            return null;
+        }
+        return cs.getLocation();
     }
 
     @Override

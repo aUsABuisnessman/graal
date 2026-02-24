@@ -50,10 +50,10 @@ import com.oracle.svm.core.jdk.VectorAPIEnabled;
 import com.oracle.svm.core.jdk.VectorAPISupport;
 import com.oracle.svm.core.option.HostedOptionValues;
 import com.oracle.svm.core.option.SubstrateOptionsParser;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.hosted.jdk.VarHandleFeature;
 import com.oracle.svm.util.LogUtils;
-import com.oracle.svm.util.ReflectionUtil;
+import com.oracle.svm.shared.util.ReflectionUtil;
 
 import jdk.graal.compiler.nodes.graphbuilderconf.GraphBuilderConfiguration;
 import jdk.graal.compiler.phases.util.Providers;
@@ -63,6 +63,7 @@ import jdk.vm.ci.meta.JavaKind;
 
 @AutomaticallyRegisteredFeature
 public class VectorAPIFeature implements InternalFeature {
+    // JVMCI migration blocked by GR-72591: Migrate VectorAPIFeature to terminus
 
     public static final String VECTOR_API_PACKAGE_NAME = "jdk.incubator.vector";
     public static final Class<?> PAYLOAD_CLASS = ReflectionUtil.lookupClass("jdk.internal.vm.vector.VectorSupport$VectorPayload");

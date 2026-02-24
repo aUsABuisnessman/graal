@@ -35,6 +35,7 @@ import java.util.Set;
 import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.WordBase;
+import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.core.code.FrameInfoQueryResult;
 import com.oracle.svm.core.code.FrameSourceInfo;
@@ -45,7 +46,6 @@ import com.oracle.svm.core.interpreter.InterpreterFrameSourceInfo;
 import com.oracle.svm.core.locks.VMMutex;
 import com.oracle.svm.core.meta.SubstrateObjectConstant;
 import com.oracle.svm.core.thread.VMThreads;
-import com.oracle.svm.core.util.VMError;
 import com.oracle.svm.interpreter.DebuggerSupport;
 import com.oracle.svm.interpreter.EspressoFrame;
 import com.oracle.svm.interpreter.InterpreterFrame;
@@ -72,8 +72,8 @@ import com.oracle.svm.jdwp.resident.ClassUtils;
 import com.oracle.svm.jdwp.resident.JDWPBridgeImpl;
 import com.oracle.svm.jdwp.resident.ThreadStartDeathSupport;
 import com.oracle.svm.jdwp.resident.api.StackframeDescriptor;
+import com.oracle.svm.shared.util.VMError;
 
-import jdk.graal.compiler.word.Word;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.Local;
@@ -263,7 +263,7 @@ public final class ResidentJDWP implements JDWP {
      * Verify that the given object id is valid and not collected. An object id can be
      * {@link SymbolicRefs#NULL null}, which is valid in this method, thus the {@code ...orNull}
      * suffix.
-     * 
+     *
      * @throws JDWPException {@link ErrorCode#INVALID_OBJECT} if the object id was collected or is
      *             invalid
      */
@@ -362,6 +362,7 @@ public final class ResidentJDWP implements JDWP {
         return reply;
     }
 
+    /* This code is broken at the moment and may cause deadlocks, see GR-73513. */
     private static VMMutex lockThreads() {
         VMMutex mutex;
         try {
@@ -1920,8 +1921,7 @@ public final class ResidentJDWP implements JDWP {
 
         static Result ofInvoke(boolean isVirtual, InterpreterResolvedJavaMethod method, Object... args) {
             try {
-                boolean isInvokeInterface = method.getDeclaringClass().isInterface();
-                return fromValue(InterpreterToVM.dispatchInvocation(method, args, isVirtual, false, false, isInvokeInterface, false));
+                return fromValue(InterpreterToVM.dispatchInvocation(method, args, isVirtual, false, false, false));
             } catch (SemanticJavaException e) {
                 return fromThrowable(e.getCause());
             } catch (StackOverflowError | OutOfMemoryError error) {
@@ -2014,7 +2014,7 @@ public final class ResidentJDWP implements JDWP {
         /*
          * The JDWP spec states that both, the receiver and the exception must be written. If an
          * exception was thrown, write a 'null' return value.
-         * 
+         *
          * In case of exception, cannot reply with a return value of type/tag void since the vanilla
          * JDI implementation expects the ClassType.NewInstance command to always return a value of
          * type/tag object, regardless of exceptions and that <init> methods actually returns void.

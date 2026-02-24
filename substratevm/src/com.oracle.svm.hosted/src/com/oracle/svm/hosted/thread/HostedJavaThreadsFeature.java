@@ -37,24 +37,22 @@ import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.core.fieldvaluetransformer.FieldValueTransformerWithAvailability;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
-import com.oracle.svm.core.layeredimagesingleton.ImageSingletonLoader;
-import com.oracle.svm.core.layeredimagesingleton.ImageSingletonWriter;
-import com.oracle.svm.core.layeredimagesingleton.LayeredPersistFlags;
 import com.oracle.svm.core.thread.JavaThreads;
 import com.oracle.svm.core.thread.JavaThreadsFeature;
 import com.oracle.svm.core.thread.PlatformThreads;
-import com.oracle.svm.core.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.core.traits.SingletonLayeredCallbacks;
-import com.oracle.svm.core.traits.SingletonLayeredCallbacksSupplier;
-import com.oracle.svm.core.traits.SingletonLayeredInstallationKind.Independent;
-import com.oracle.svm.core.traits.SingletonTrait;
-import com.oracle.svm.core.traits.SingletonTraitKind;
-import com.oracle.svm.core.traits.SingletonTraits;
 import com.oracle.svm.core.util.ConcurrentIdentityHashMap;
 import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.hosted.FeatureImpl;
+import com.oracle.svm.shared.singletons.ImageSingletonLoader;
+import com.oracle.svm.shared.singletons.ImageSingletonWriter;
+import com.oracle.svm.shared.singletons.LayeredPersistFlags;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
+import com.oracle.svm.shared.singletons.traits.LayeredCallbacksSingletonTrait;
+import com.oracle.svm.shared.singletons.traits.SingletonLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.SingletonLayeredCallbacksSupplier;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.util.ClassUtil;
-import com.oracle.svm.util.ReflectionUtil;
+import com.oracle.svm.shared.util.ReflectionUtil;
 
 @AutomaticallyRegisteredFeature
 public class HostedJavaThreadsFeature extends JavaThreadsFeature {
@@ -87,6 +85,7 @@ public class HostedJavaThreadsFeature extends JavaThreadsFeature {
     @Override
     public void beforeAnalysis(BeforeAnalysisAccess a) {
         a.registerFieldValueTransformer(ReflectionUtil.lookupField(ThreadGroup.class, "ngroups"), new FieldValueTransformerWithAvailability() {
+            // JVMCI migration blocked by GR-72587: Migrate (virtual) thread support for terminus
 
             /*
              * We must wait until reachableThreadGroups stabilizes after analysis to replace this
@@ -105,6 +104,7 @@ public class HostedJavaThreadsFeature extends JavaThreadsFeature {
         });
 
         a.registerFieldValueTransformer(ReflectionUtil.lookupField(ThreadGroup.class, "groups"), new FieldValueTransformerWithAvailability() {
+            // JVMCI migration blocked by GR-72587: Migrate (virtual) thread support for terminus
 
             /*
              * We must wait until reachableThreadGroups stabilizes after analysis to replace this
@@ -249,7 +249,7 @@ class ReachableThreadGroup {
 }
 
 @AutomaticallyRegisteredImageSingleton
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = HostedJavaThreadsMetadata.LayeredCallbacks.class, layeredInstallationKind = Independent.class)
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = HostedJavaThreadsMetadata.LayeredCallbacks.class)
 class HostedJavaThreadsMetadata {
     long maxThreadId;
     int maxAutonumber;
@@ -276,7 +276,7 @@ class HostedJavaThreadsMetadata {
 
     static class LayeredCallbacks extends SingletonLayeredCallbacksSupplier {
         @Override
-        public SingletonTrait getLayeredCallbacksTrait() {
+        public LayeredCallbacksSingletonTrait getLayeredCallbacksTrait() {
             SingletonLayeredCallbacks<HostedJavaThreadsMetadata> action = new SingletonLayeredCallbacks<>() {
                 @Override
                 public LayeredPersistFlags doPersist(ImageSingletonWriter writer, HostedJavaThreadsMetadata singleton) {
@@ -288,7 +288,7 @@ class HostedJavaThreadsMetadata {
                     return SingletonInstantiator.class;
                 }
             };
-            return new SingletonTrait(SingletonTraitKind.LAYERED_CALLBACKS, action);
+            return new LayeredCallbacksSingletonTrait(action);
         }
     }
 

@@ -73,13 +73,12 @@ import com.oracle.svm.core.option.RuntimeOptionKey;
 import com.oracle.svm.core.option.SubstrateOptionsParser;
 import com.oracle.svm.core.pltgot.PLTGOTConfiguration;
 import com.oracle.svm.core.thread.VMOperationControl;
-import com.oracle.svm.core.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.core.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.core.traits.SingletonLayeredInstallationKind.Independent;
-import com.oracle.svm.core.traits.SingletonTraits;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.core.util.TimeUtils;
 import com.oracle.svm.core.util.UserError;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.util.JVMCIReflectionUtil;
 import com.oracle.svm.util.LogUtils;
 
@@ -189,20 +188,6 @@ public class SubstrateOptions {
 
     @Option(help = "Builds image with libstdc++ statically linked into the image (if needed)", type = Expert, stability = OptionStability.EXPERIMENTAL)//
     public static final HostedOptionKey<Boolean> StaticLibStdCpp = new HostedOptionKey<>(false);
-
-    public static final int ForceFallback = 10;
-    public static final int Automatic = 5;
-    public static final int NoFallback = 0;
-
-    public static final String OptionNameForceFallback = "force-fallback";
-    public static final String OptionNameAutoFallback = "auto-fallback";
-    public static final String OptionNameNoFallback = "no-fallback";
-
-    @APIOption(name = OptionNameForceFallback, fixedValue = "" + ForceFallback, customHelp = "force building of fallback image") //
-    @APIOption(name = OptionNameAutoFallback, fixedValue = "" + Automatic, customHelp = "build stand-alone image if possible") //
-    @APIOption(name = OptionNameNoFallback, fixedValue = "" + NoFallback, customHelp = "build stand-alone image or report failure") //
-    @Option(help = "Define when fallback-image generation should be used.")//
-    public static final HostedOptionKey<Integer> FallbackThreshold = new HostedOptionKey<>(Automatic);
 
     public static final String IMAGE_CLASSPATH_PREFIX = "-imagecp";
     public static final String IMAGE_MODULEPATH_PREFIX = "-imagemp";
@@ -329,7 +314,7 @@ public class SubstrateOptions {
             GraalOptions.OptimizeLongJumps.update(values, !newLevel.isOneOf(OptimizationLevel.O0, OptimizationLevel.BUILD_TIME));
 
             if (newLevel == OptimizationLevel.SIZE) {
-                configureOs(values);
+                configureOptimizeForCodeSize(values, true, true);
             }
 
             if (optimizeValueUpdateHandler != null) {
@@ -339,19 +324,21 @@ public class SubstrateOptions {
         }
     };
 
-    public static void configureOs(EconomicMap<OptionKey<?>, Object> values) {
-        enableForOs(GraalOptions.ReduceCodeSize, values);
-        enableForOs(ReduceImplicitExceptionStackTraceInformation, values);
-        enableForOs(GraalOptions.OptimizeLongJumps, values);
+    public static void configureOptimizeForCodeSize(EconomicMap<OptionKey<?>, Object> values, boolean disableLoopOptimizations, boolean disablePEA) {
+        enable(GraalOptions.ReduceCodeSize, values);
+        enable(ReduceImplicitExceptionStackTraceInformation, values);
+        enable(GraalOptions.OptimizeLongJumps, values);
 
-        /*
-         * Remove all loop optimizations that can increase code size, i.e., duplicate a loop body
-         * somehow.
-         */
-        disableForOs(GraalOptions.LoopPeeling, values);
-        disableForOs(GraalOptions.LoopUnswitch, values);
-        disableForOs(GraalOptions.FullUnroll, values);
-        disableForOs(GraalOptions.PartialUnroll, values);
+        if (disableLoopOptimizations) {
+            /*
+             * Remove all loop optimizations that can increase code size, i.e., duplicate a loop
+             * body somehow.
+             */
+            disable(GraalOptions.LoopPeeling, values);
+            disable(GraalOptions.LoopUnswitch, values);
+            disable(GraalOptions.FullUnroll, values);
+            disable(GraalOptions.PartialUnroll, values);
+        }
 
         /*
          * Do not align code to further reduce code size.
@@ -361,17 +348,19 @@ public class SubstrateOptions {
         GraalOptions.IsolatedLoopHeaderAlignment.update(values, 0);
         // We cannot check for architecture at the moment because ImageSingletons has not been
         // initialized yet
-        disableForOs(AMD64Assembler.Options.UseBranchesWithin32ByteBoundary, values);
+        disable(AMD64Assembler.Options.UseBranchesWithin32ByteBoundary, values);
 
-        /*
-         * Do not run PEA - it can fan out allocations too much.
-         */
-        disableForOs(GraalOptions.PartialEscapeAnalysis, values);
+        if (disablePEA) {
+            /*
+             * Do not run PEA - it can fan out allocations too much.
+             */
+            disable(GraalOptions.PartialEscapeAnalysis, values);
+        }
 
         /*
          * Do not fan out division.
          */
-        disableForOs(GraalOptions.OptimizeDiv, values);
+        disable(GraalOptions.OptimizeDiv, values);
 
         /*
          * Do more conditional elimination.
@@ -381,22 +370,22 @@ public class SubstrateOptions {
         /*
          * Every dead code elimination should be non-optional
          */
-        disableForOs(DeadCodeEliminationPhase.Options.ReduceDCE, values);
+        disable(DeadCodeEliminationPhase.Options.ReduceDCE, values);
     }
 
     /**
-     * Sets {@code key} to false in {@code values} as a consequence of {@code -Os} having been
-     * specified. This silently overrides any existing value for {@code key} in {@code values}.
+     * Sets {@code key} to false in {@code values}. This silently overrides any existing value for
+     * {@code key} in {@code values}.
      */
-    public static void disableForOs(OptionKey<Boolean> key, EconomicMap<OptionKey<?>, Object> values) {
+    public static void disable(OptionKey<Boolean> key, EconomicMap<OptionKey<?>, Object> values) {
         key.update(values, false);
     }
 
     /**
-     * Sets {@code key} to true in {@code values} as a consequence of {@code -Os} having been
-     * specified. This silently overrides any existing value for {@code key} in {@code values}.
+     * Sets {@code key} to true in {@code values}. This silently overrides any existing value for
+     * {@code key} in {@code values}.
      */
-    public static void enableForOs(OptionKey<Boolean> key, EconomicMap<OptionKey<?>, Object> values) {
+    public static void enable(OptionKey<Boolean> key, EconomicMap<OptionKey<?>, Object> values) {
         key.update(values, true);
     }
 
@@ -608,6 +597,17 @@ public class SubstrateOptions {
         @Option(help = "The number of nanoseconds that the isolate teardown can take before a fatal error is thrown. Disabled if less or equal to 0.", //
                         deprecated = true, deprecationMessage = "Use -XX:TearDownFailureSeconds=<secs> instead")//
         public static final RuntimeOptionKey<Long> TearDownFailureNanos = new RuntimeOptionKey<>(0L, RelevantForCompilationIsolates);
+
+        public static final int Automatic = 5;
+        public static final int NoFallback = 0;
+
+        public static final String OptionNameAutoFallback = "auto-fallback";
+        public static final String OptionNameNoFallback = "no-fallback";
+
+        @APIOption(name = OptionNameAutoFallback, fixedValue = "" + Automatic, customHelp = "build stand-alone image if possible", deprecated = "No effect, no replacement available") //
+        @APIOption(name = OptionNameNoFallback, fixedValue = "" + NoFallback, customHelp = "build stand-alone image or report failure", deprecated = "No effect, no replacement available") //
+        @Option(help = "Deprecated, option no longer has any effect.", deprecated = true, deprecationMessage = "It no longer has any effect, and no replacement is available")//
+        public static final HostedOptionKey<Integer> FallbackThreshold = new HostedOptionKey<>(Automatic);
     }
 
     @LayerVerifiedOption(kind = Kind.Changed, severity = Severity.Error)//
@@ -1147,12 +1147,7 @@ public class SubstrateOptions {
             if (values.containsKey(this)) {
                 return (Boolean) values.get(this);
             }
-            /*
-             * GR-70850: ImageInfo.isExecutable is inconsistent across layers. Since only an
-             * executable application layer is currently supported on Layered Images, the current
-             * solution is to enable this by default.
-             */
-            return ImageInfo.isExecutable() || ImageLayerBuildingSupport.buildingImageLayer();
+            return isExecutableHelper();
         }
 
         @Override
@@ -1283,6 +1278,10 @@ public class SubstrateOptions {
             }
         });
 
+        /** Use {@link SubstrateOptions#isSignalHandlingAllowed()} instead. */
+        @Option(help = "Enables signal handling", stability = OptionStability.EXPERIMENTAL, type = Expert)//
+        public static final RuntimeOptionKey<Boolean> EnableSignalHandling = new RuntimeOptionKey<>(null, Immutable);
+
         /** Use {@link SubstrateOptions#useRistretto()} instead. */
         @Option(help = "Prepare native image to compile bytecodes at runtime.")//
         public static final HostedOptionKey<Boolean> GraalJITCompileAtRuntime = new HostedOptionKey<>(false, actualValue -> {
@@ -1299,27 +1298,6 @@ public class SubstrateOptions {
 
     @Option(help = "For internal purposes only. Disables type id result verification even when running with assertions enabled.", stability = OptionStability.EXPERIMENTAL, type = OptionType.Debug)//
     public static final HostedOptionKey<Boolean> DisableTypeIdResultVerification = new HostedOptionKey<>(true);
-
-    @Option(help = "Enables signal handling", stability = OptionStability.EXPERIMENTAL, type = Expert)//
-    public static final RuntimeOptionKey<Boolean> EnableSignalHandling = new RuntimeOptionKey<>(null, Immutable) {
-        @Override
-        public Boolean getValueOrDefault(UnmodifiableEconomicMap<OptionKey<?>, Object> values) {
-            if (values.containsKey(this)) {
-                return (Boolean) values.get(this);
-            }
-            /*
-             * GR-70850: ImageInfo.isExecutable is inconsistent across layers. Since only an
-             * executable application layer is currently supported on Layered Images, the current
-             * solution is to enable this by default.
-             */
-            return ImageInfo.isExecutable() || ImageLayerBuildingSupport.buildingImageLayer();
-        }
-
-        @Override
-        public Boolean getValue(OptionValues values) {
-            return getValueOrDefault(values.getMap());
-        }
-    };
 
     @LayerVerifiedOption(kind = Kind.Changed, severity = Severity.Error)//
     @Option(help = "Determines if the system locale should be used at run-time. If this is disabled, the locale 'en-US' will be used instead.", stability = OptionStability.EXPERIMENTAL, type = Expert)//
@@ -1338,11 +1316,6 @@ public class SubstrateOptions {
 
     @Option(help = "Create a heap dump and exit.")//
     public static final RuntimeOptionKey<Boolean> DumpHeapAndExit = new RuntimeOptionKey<>(false, Immutable);
-
-    @Option(help = "Name of a csv file into which image heap metadata should be dumped. " +
-                    "This csv file will be located in the same directory as the image. " +
-                    "If this option is an empty string, the metadata will not be dumped.") //
-    public static final HostedOptionKey<String> ImageHeapMetadataDumpFileName = new HostedOptionKey<>("");
 
     @Option(help = "Print some VM information and exit.")//
     public static final RuntimeOptionKey<Boolean> PrintVMInfoAndExit = new RuntimeOptionKey<>(false, Immutable);
@@ -1368,7 +1341,7 @@ public class SubstrateOptions {
         return getImagePath().resolve(reportsPath).toString();
     }
 
-    @SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Independent.class)
+    @SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class)
     public static class ReportingSupport {
         Path reportsPath;
 
@@ -1418,6 +1391,9 @@ public class SubstrateOptions {
     @APIOption(name = "configure-reflection-metadata", deprecated = "This option has no function anymore.")//
     @Option(help = "Enable runtime instantiation of reflection objects for non-invoked methods.", type = OptionType.Expert, deprecated = true)//
     public static final HostedOptionKey<Boolean> ConfigureReflectionMetadata = new HostedOptionKey<>(true);
+
+    @Option(help = "Print a list of parsed metadata configuration files.", type = OptionType.Expert)//
+    public static final HostedOptionKey<Boolean> ReportUsedMetadataFiles = new HostedOptionKey<>(false);
 
     @Option(help = "Include a list of methods included in the image for runtime inspection.", type = OptionType.Expert)//
     public static final HostedOptionKey<Boolean> IncludeMethodData = new HostedOptionKey<>(false);
@@ -1577,6 +1553,23 @@ public class SubstrateOptions {
     @Fold
     public static int interfaceHashingMaxId() {
         return InterfaceHashingMaxId.getValue();
+    }
+
+    public static boolean isSignalHandlingAllowed() {
+        Boolean value = ConcealedOptions.EnableSignalHandling.getValue();
+        if (value != null) {
+            return value;
+        }
+        return isExecutableHelper();
+    }
+
+    /**
+     * When building the initial layer, it's impossible to know if the application layer will be an
+     * executable, or a shared library. For this reason, the exit handlers should always be
+     * installed in the initial layer and the decision to run it or not is delayed to run time.
+     */
+    private static boolean isExecutableHelper() {
+        return ImageLayerBuildingSupport.buildingInitialLayer() || ImageInfo.isExecutable();
     }
 
     public static class TruffleStableOptions {

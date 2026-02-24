@@ -47,7 +47,7 @@ import com.oracle.svm.core.option.HostedOptionKey;
 import com.oracle.svm.core.option.SubstrateOptionsParser;
 import com.oracle.svm.core.util.InterruptImageBuilding;
 import com.oracle.svm.core.util.UserError;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.hosted.c.codegen.CCompilerInvoker;
 import com.oracle.svm.hosted.c.util.FileUtils;
 import com.oracle.svm.hosted.webimage.wasm.WebImageWasmOptions;
@@ -140,7 +140,7 @@ public abstract class WasmAssembler {
             printer.accept("Output for " + result.commandLine + ":");
             outLines.forEach(printer);
         }
-        UserError.guarantee(exitCode == 0, "%s failed with exit code: %s", result.executable.toString(), exitCode);
+        UserError.guarantee(exitCode == 0, "%s failed with exit code: %s", result.executable, exitCode);
 
     }
 

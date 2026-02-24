@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core.genscavenge;
 
-import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+import static com.oracle.svm.guest.staging.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 import static com.oracle.svm.core.heap.ReferenceInternals.getReferentFieldAddress;
 import static jdk.graal.compiler.nodes.extended.BranchProbabilityNode.SLOW_PATH_PROBABILITY;
 import static jdk.graal.compiler.nodes.extended.BranchProbabilityNode.probability;
@@ -37,7 +37,8 @@ import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 
 import com.oracle.svm.core.AlwaysInline;
-import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.SubstrateGCOptions;
+import com.oracle.svm.guest.staging.Uninterruptible;
 import com.oracle.svm.core.config.ConfigurationValues;
 import com.oracle.svm.core.genscavenge.remset.RememberedSet;
 import com.oracle.svm.core.heap.Heap;
@@ -47,8 +48,7 @@ import com.oracle.svm.core.heap.ReferenceInternals;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.snippets.KnownIntrinsics;
 import com.oracle.svm.core.util.UnsignedUtils;
-
-import jdk.graal.compiler.word.Word;
+import org.graalvm.word.impl.Word;
 
 /** Discovers and handles {@link Reference} objects during garbage collection. */
 final class ReferenceObjectProcessing {
@@ -188,7 +188,7 @@ final class ReferenceObjectProcessing {
     static void afterCollection(UnsignedWord freeBytes) {
         assert rememberedRefsList == null;
         UnsignedWord unused = freeBytes.unsignedDivide(1024 * 1024 /* MB */);
-        maxSoftRefAccessIntervalMs = unused.multiply(SerialGCOptions.SoftRefLRUPolicyMSPerMB.getValue());
+        maxSoftRefAccessIntervalMs = unused.multiply(SubstrateGCOptions.SoftRefLRUPolicyMSPerMB.getValue());
         ReferenceInternals.updateSoftReferenceClock();
         if (initialSoftRefClock == 0) {
             initialSoftRefClock = ReferenceInternals.getSoftReferenceClock();

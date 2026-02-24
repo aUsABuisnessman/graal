@@ -40,13 +40,13 @@ import com.oracle.svm.core.code.IsolateLeaveStub;
 import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.meta.MethodPointer;
-import com.oracle.svm.core.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.core.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.core.traits.BuiltinTraits.PartiallyLayerAware;
-import com.oracle.svm.core.traits.SingletonLayeredInstallationKind.Independent;
-import com.oracle.svm.core.traits.SingletonTraits;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.PartiallyLayerAware;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.hosted.FeatureImpl.DuringSetupAccessImpl;
 
+import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
 /**
@@ -55,7 +55,7 @@ import jdk.vm.ci.meta.ResolvedJavaType;
  * {@link CEntryPointCallStubSupport#cFunctionPointerCache} is currently duplicated across layers as
  * we cannot reload the {@link BoxedRelocatedPointer} across layers.
  */
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Independent.class, other = PartiallyLayerAware.class)
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = PartiallyLayerAware.class)
 public final class CEntryPointCallStubSupport {
     public static CEntryPointCallStubSupport singleton() {
         return ImageSingletons.lookup(CEntryPointCallStubSupport.class);
@@ -80,9 +80,9 @@ public final class CEntryPointCallStubSupport {
         return getStubForMethod(method);
     }
 
-    public AnalysisMethod registerStubForMethod(Executable reflectionMethod, Supplier<CEntryPointData> entryPointDataSupplier) {
-        AnalysisMethod method = bb.getMetaAccess().lookupJavaMethod(reflectionMethod);
-        return registerStubForMethod(method, entryPointDataSupplier);
+    public void registerStubForMethod(ResolvedJavaMethod originalMethod, Supplier<CEntryPointData> entryPointDataSupplier) {
+        AnalysisMethod method = bb.getUniverse().lookup(originalMethod);
+        registerStubForMethod(method, entryPointDataSupplier);
     }
 
     public AnalysisMethod getStubForMethod(AnalysisMethod method) {
@@ -130,7 +130,7 @@ public final class CEntryPointCallStubSupport {
 }
 
 @AutomaticallyRegisteredFeature
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Independent.class)
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class)
 class CEntryPointCallStubFeature implements InternalFeature {
     @Override
     public void duringSetup(DuringSetupAccess arg) {

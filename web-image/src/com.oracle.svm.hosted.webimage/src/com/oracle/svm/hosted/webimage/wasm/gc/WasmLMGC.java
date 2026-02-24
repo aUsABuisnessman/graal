@@ -40,12 +40,13 @@ import org.graalvm.nativeimage.c.struct.RawStructure;
 import org.graalvm.nativeimage.c.struct.SizeOf;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
+import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.core.AlwaysInline;
 import com.oracle.svm.core.MemoryWalker;
 import com.oracle.svm.core.NeverInline;
 import com.oracle.svm.core.SubstrateGCOptions;
-import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.guest.staging.Uninterruptible;
 import com.oracle.svm.core.UnmanagedMemoryUtil;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
@@ -72,7 +73,7 @@ import com.oracle.svm.core.thread.NativeVMOperation;
 import com.oracle.svm.core.thread.NativeVMOperationData;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.util.UserError;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.hosted.webimage.wasm.stack.WebImageWasmStackFrameVisitor;
 import com.oracle.svm.hosted.webimage.wasm.stack.WebImageWasmStackWalker;
 import com.oracle.svm.webimage.platform.WebImageWasmLMPlatform;
@@ -82,7 +83,6 @@ import jdk.graal.compiler.api.replacements.Fold;
 import jdk.graal.compiler.options.Option;
 import jdk.graal.compiler.options.OptionKey;
 import jdk.graal.compiler.options.OptionType;
-import jdk.graal.compiler.word.Word;
 
 /**
  * Simple mark-sweep garbage collector using tri-coloring for the WasmLM backend. Objects have one
@@ -705,7 +705,7 @@ final class SizedObjectStack {
     public void push(Object o) {
         VMError.guarantee(hasSpace(), "Tried to push onto full stack");
         assert o != null;
-        stack[currentSize] = Word.objectToUntrackedPointer(o);
+        stack[currentSize] = Word.objectToUntrackedWord(o);
         currentSize++;
     }
 }

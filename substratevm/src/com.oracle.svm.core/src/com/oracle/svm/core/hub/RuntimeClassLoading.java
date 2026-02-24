@@ -39,7 +39,7 @@ import com.oracle.svm.core.hub.registry.ClassRegistries;
 import com.oracle.svm.core.option.HostedOptionKey;
 import com.oracle.svm.core.option.SubstrateOptionsParser;
 import com.oracle.svm.core.util.UserError;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.espresso.classfile.Constants;
 
 import jdk.graal.compiler.api.replacements.Fold;
@@ -165,7 +165,8 @@ public class RuntimeClassLoading {
     public static RuntimeException throwNoBytecodeClasses(String className) {
         assert !PredefinedClassesSupport.hasBytecodeClasses() && !RuntimeClassLoading.isSupported();
         throw VMError.unsupportedFeature(
-                        "Classes cannot be defined at runtime by default when using ahead-of-time Native Image compilation. Tried to define class '" + className + "'" + System.lineSeparator() +
+                        "Classes cannot be defined at runtime by default when using ahead-of-time Native Image compilation. Tried to define class:" + System.lineSeparator() + System.lineSeparator() +
+                                        "    " + className + System.lineSeparator() + System.lineSeparator() +
                                         DEFINITION_NOT_SUPPORTED_MESSAGE);
     }
 
