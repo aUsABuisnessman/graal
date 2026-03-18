@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core;
 
-import com.oracle.svm.guest.staging.Uninterruptible;
+import com.oracle.svm.shared.Uninterruptible;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
@@ -160,7 +160,7 @@ public final class UnmanagedMemoryUtil {
     @IntrinsicCandidate
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static void copyWordsForward(Pointer from, Pointer to, UnsignedWord size) {
-        int wordSize = ConfigurationValues.getTarget().wordSize;
+        int wordSize = ConfigurationValues.getWordSize();
         int stepSize = 4 * wordSize;
         Pointer src = from;
         Pointer dst = to;

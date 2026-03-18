@@ -66,7 +66,6 @@ import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.c.function.CFunctionPointer;
 import org.graalvm.word.Pointer;
-import org.graalvm.word.WordBase;
 import org.graalvm.word.impl.Word;
 
 import com.oracle.graal.pointsto.constraints.UnsupportedPlatformException;
@@ -75,6 +74,7 @@ import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.meta.AnalysisUniverse;
 import com.oracle.svm.core.BuildPhaseProvider.ReadyForCompilation;
+import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.config.ConfigurationValues;
 import com.oracle.svm.core.graal.meta.KnownOffsets;
 import com.oracle.svm.core.heap.UnknownPrimitiveField;
@@ -93,8 +93,7 @@ import com.oracle.svm.core.hub.registry.TypeIDs;
 import com.oracle.svm.core.invoke.Target_java_lang_invoke_MemberName;
 import com.oracle.svm.core.log.Log;
 import com.oracle.svm.core.meta.MethodPointer;
-import com.oracle.svm.core.util.BasedOnJDKFile;
-import com.oracle.svm.shared.util.VMError;
+import com.oracle.svm.core.snippets.KnownIntrinsics;
 import com.oracle.svm.espresso.classfile.ConstantPool;
 import com.oracle.svm.espresso.classfile.Constants;
 import com.oracle.svm.espresso.classfile.JavaKind;
@@ -118,6 +117,7 @@ import com.oracle.svm.espresso.classfile.descriptors.Type;
 import com.oracle.svm.espresso.classfile.descriptors.TypeSymbols;
 import com.oracle.svm.espresso.shared.meta.MethodHandleIntrinsics;
 import com.oracle.svm.espresso.shared.meta.SignaturePolymorphicIntrinsic;
+import com.oracle.svm.espresso.shared.resolver.CallKind;
 import com.oracle.svm.espresso.shared.resolver.CallSiteType;
 import com.oracle.svm.espresso.shared.resolver.ResolvedCall;
 import com.oracle.svm.espresso.shared.vtable.MethodTableException;
@@ -135,12 +135,19 @@ import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaMethod;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaType;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedObjectType;
 import com.oracle.svm.interpreter.metadata.InterpreterUnresolvedSignature;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.Disallowed;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
+import com.oracle.svm.shared.util.BasedOnJDKFile;
+import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.nodes.extended.MembarNode;
 import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
+@SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
 public class CremaSupportImpl implements CremaSupport {
     private static final int[] EMPTY_INT_ARRAY = new int[0];
     private final MethodHandleIntrinsics<InterpreterResolvedJavaType, InterpreterResolvedJavaMethod, InterpreterResolvedJavaField> methodHandleIntrinsics = new MethodHandleIntrinsics<>();
@@ -377,7 +384,7 @@ public class CremaSupportImpl implements CremaSupport {
          */
         InterpreterResolvedJavaMethod[] completeVTable = dispatchTable.cremaVTable(transitiveSuperInterfaces).toArray(InterpreterResolvedJavaMethod.EMPTY_ARRAY);
         assert completeVTable.length == hubNumVTableEntries;
-        thisType.setVtable(completeVTable);
+        thisType.setVtable(completeVTable, dispatchTable.vtableLength());
         fillVTable(hub, completeVTable);
 
         thisType.setDeclaredMethods(dispatchTable.declaredMethods());
@@ -503,7 +510,7 @@ public class CremaSupportImpl implements CremaSupport {
     }
 
     private static void fillVTable(DynamicHub hub, InterpreterResolvedJavaMethod[] vtable) {
-        int wordSize = ConfigurationValues.getTarget().wordSize;
+        int wordSize = ConfigurationValues.getWordSize();
         assert KnownOffsets.singleton().getVTableEntrySize() == wordSize : "only word size is implemented at the moment";
 
         Pointer hubStart = Word.objectToUntrackedPointer(hub);
@@ -512,7 +519,16 @@ public class CremaSupportImpl implements CremaSupport {
         Pointer pos = hubStart.add(KnownOffsets.singleton().getVTableBaseOffset());
         for (int i = 0; i < vtable.length; i++) {
             InterpreterResolvedJavaMethod method = vtable[i];
-            WordBase entry = method.hasNativeEntryPoint() ? method.getNativeEntryPoint() : getCremaStubForVTableIndex(i);
+            Pointer entry = method.hasNativeEntryPoint() ? (Pointer) method.getNativeEntryPoint() : getCremaStubForVTableIndex(i);
+
+            if (SubstrateOptions.useRelativeCodePointers()) {
+                /*
+                 * vtables contain offsets from the code base. It's fine for them to be negative
+                 * (overflow/underflow) when the code is loaded below the code base, which can
+                 * include interpreter stubs that are not part of the text section.
+                 */
+                entry = entry.subtract(KnownIntrinsics.codeBase());
+            }
 
             pos.writeWord(0, entry);
             pos = pos.add(wordSize);
@@ -611,7 +627,9 @@ public class CremaSupportImpl implements CremaSupport {
                         componentType, superType, interfaces, null,
                         DynamicHub.toClass(arrayHub), false);
 
-        thisType.setVtable(cremaVTable);
+        thisType.setVtable(cremaVTable, objectArrayType.getClassVtableLength());
+        thisType.setDeclaredMethods(InterpreterResolvedJavaMethod.EMPTY_ARRAY);
+        thisType.setDeclaredFields(InterpreterResolvedJavaField.EMPTY_ARRAY);
         fillVTable(arrayHub, cremaVTable);
 
         arrayHub.setInterpreterType(thisType);
@@ -901,17 +919,10 @@ public class CremaSupportImpl implements CremaSupport {
         }
 
         private static List<InterpreterResolvedJavaMethod> computeParentTable(Class<?> superClass) {
-            DynamicHub superHub = DynamicHub.fromClass(superClass);
-            InterpreterResolvedObjectType superType = (InterpreterResolvedObjectType) superHub.getInterpreterType();
+            InterpreterResolvedObjectType superType = (InterpreterResolvedObjectType) DynamicHub.fromClass(superClass).getInterpreterType();
             InterpreterResolvedJavaMethod[] superVTableMirror = superType.getVtable();
-            // Computes the size of the parent's vtable, without the trailing itables.
-            long vTableEntrySize = KnownOffsets.singleton().getVTableEntrySize();
-            long minOffset = superVTableMirror.length * vTableEntrySize;
-            int[] typeSlots = superHub.getOpenTypeWorldTypeCheckSlots();
-            for (int i = superHub.getNumClassTypes(); i < typeSlots.length; i += 2) {
-                minOffset = Math.min(minOffset, typeSlots[i + 1]);
-            }
-            int superTableLen = Math.toIntExact(minOffset / vTableEntrySize);
+            int superTableLen = superType.getClassVtableLength();
+            VMError.guarantee(superTableLen >= 0 && superTableLen <= superVTableMirror.length, "Invalid parent table length");
             InterpreterResolvedJavaMethod[] superTable = Arrays.copyOf(superVTableMirror, superTableLen);
             return Arrays.asList(superTable);
         }
@@ -1008,7 +1019,7 @@ public class CremaSupportImpl implements CremaSupport {
             if (resolved != null) {
                 return resolved;
             }
-            int dispatchIndex = InterpreterResolvedJavaMethod.VTBL_NO_ENTRY;
+            int dispatchIndex = InterpreterResolvedJavaMethod.VTBL_UNINITIALIZED;
             if (vtableIndex != -1) {
                 assert itableIndex == -1;
                 dispatchIndex = vtableIndex;
@@ -1258,10 +1269,10 @@ public class CremaSupportImpl implements CremaSupport {
     }
 
     @Override
-    public Object execute(ResolvedJavaMethod targetMethod, Object[] args, boolean isVirtual) {
+    public Object execute(ResolvedJavaMethod targetMethod, Object[] args, CallKind callKind) {
         InterpreterResolvedJavaMethod iMethod = (InterpreterResolvedJavaMethod) targetMethod;
         try {
-            return InterpreterToVM.dispatchInvocation(iMethod, args, isVirtual, false, false, false);
+            return InterpreterToVM.dispatchInvocation(iMethod, args, callKind, false, false, false);
         } catch (SemanticJavaException e) {
             throw uncheckedThrow(e.getCause());
         }
@@ -1492,7 +1503,7 @@ public class CremaSupportImpl implements CremaSupport {
         System.arraycopy(args, 0, basicArgs, 1, args.length);
         logIntrinsic("[from compiled] invokeBasic ", vmentry, basicArgs);
         try {
-            return InterpreterToVM.dispatchInvocation(vmentry, basicArgs, false, false, false, true);
+            return InterpreterToVM.dispatchInvocation(vmentry, basicArgs, CallKind.DIRECT, false, false, true);
         } catch (SemanticJavaException e) {
             throw uncheckedThrow(e.getCause());
         }
@@ -1508,7 +1519,7 @@ public class CremaSupportImpl implements CremaSupport {
         Object[] basicArgs = unbasic(args, signature, true);
         logIntrinsic("[from compiled] linkToVirtual ", target, basicArgs);
         try {
-            Object result = InterpreterToVM.dispatchInvocation(target, basicArgs, true, false, false, true);
+            Object result = InterpreterToVM.dispatchInvocation(target, basicArgs, CallKind.VTABLE_LOOKUP, false, false, true);
             return Interpreter.rebasic(result, signature.getReturnKind());
         } catch (SemanticJavaException e) {
             throw uncheckedThrow(e.getCause());
@@ -1525,7 +1536,7 @@ public class CremaSupportImpl implements CremaSupport {
         Object[] basicArgs = unbasic(args, signature, false);
         logIntrinsic("[from compiled] linkToStatic ", target, basicArgs);
         try {
-            Object result = InterpreterToVM.dispatchInvocation(target, basicArgs, false, false, false, true);
+            Object result = InterpreterToVM.dispatchInvocation(target, basicArgs, CallKind.STATIC, false, false, true);
             return Interpreter.rebasic(result, signature.getReturnKind());
         } catch (SemanticJavaException e) {
             throw uncheckedThrow(e.getCause());
@@ -1542,7 +1553,7 @@ public class CremaSupportImpl implements CremaSupport {
         Object[] basicArgs = unbasic(args, signature, true);
         logIntrinsic("[from compiled] linkToSpecial ", target, basicArgs);
         try {
-            Object result = InterpreterToVM.dispatchInvocation(target, basicArgs, false, false, false, true);
+            Object result = InterpreterToVM.dispatchInvocation(target, basicArgs, CallKind.DIRECT, false, false, true);
             return Interpreter.rebasic(result, signature.getReturnKind());
         } catch (SemanticJavaException e) {
             throw uncheckedThrow(e.getCause());
@@ -1559,7 +1570,7 @@ public class CremaSupportImpl implements CremaSupport {
         Object[] basicArgs = unbasic(args, signature, true);
         logIntrinsic("[from compiled] linkToInterface ", target, basicArgs);
         try {
-            Object result = InterpreterToVM.dispatchInvocation(target, basicArgs, true, false, false, true);
+            Object result = InterpreterToVM.dispatchInvocation(target, basicArgs, CallKind.ITABLE_LOOKUP, false, false, true);
             return Interpreter.rebasic(result, signature.getReturnKind());
         } catch (SemanticJavaException e) {
             throw uncheckedThrow(e.getCause());

@@ -31,8 +31,8 @@ import java.util.Collection;
 import java.util.List;
 
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
-import com.oracle.svm.common.meta.MethodVariant;
 import com.oracle.svm.hosted.code.SubstrateCompilationDirectives;
+import com.oracle.svm.common.meta.MethodVariant;
 
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 

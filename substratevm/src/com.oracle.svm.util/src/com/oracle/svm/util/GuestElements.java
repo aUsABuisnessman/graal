@@ -27,11 +27,15 @@ package com.oracle.svm.util;
 import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
+import java.nio.ByteOrder;
 
+import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.c.function.CFunction;
 import org.graalvm.nativeimage.c.function.InvokeCFunctionPointer;
+
+import com.oracle.svm.shared.singletons.ImageSingletonsSupportImpl;
 
 import jdk.graal.compiler.vmaccess.VMAccess;
 import jdk.vm.ci.meta.ResolvedJavaField;
@@ -85,10 +89,18 @@ public abstract sealed class GuestElements permits GuestAccess.GuestElementsImpl
     public final ResolvedJavaType java_io_InputStream = lookupType(InputStream.class);
     public final ResolvedJavaMethod java_io_Input_Stream_readAllBytesMethod = lookupMethod(java_io_InputStream, "readAllBytes");
 
-    public final ResolvedJavaType Uninterruptible = lookupType("com.oracle.svm.guest.staging.Uninterruptible");
+    public final ResolvedJavaType java_nio_ByteOrder = lookupType(ByteOrder.class);
+
+    public final ResolvedJavaType Uninterruptible = lookupType("com.oracle.svm.shared.Uninterruptible");
     public final ResolvedJavaType CFunction = lookupType(CFunction.class);
     public final ResolvedJavaType InvokeCFunctionPointer = lookupType(InvokeCFunctionPointer.class);
     public final ResolvedJavaType InternalVMMethod = lookupType("com.oracle.svm.guest.staging.jdk.InternalVMMethod");
+
+    public final ResolvedJavaType ImageSingletons = lookupType(ImageSingletons.class);
+    public final ResolvedJavaMethod ImageSingletons_add = lookupMethod(ImageSingletons, "add", Class.class, Object.class);
+
+    public final ResolvedJavaType HostedManagement = lookupType(ImageSingletonsSupportImpl.HostedManagement.class);
+    public final ResolvedJavaMethod HostedManagement_install = lookupMethod(HostedManagement, "install");
     // Checkstyle: resume field name check
 
     protected abstract ResolvedJavaType lookupType(Class<?> clazz);

@@ -31,6 +31,8 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Set;
 
+import org.graalvm.collections.EconomicSet;
+
 import com.oracle.graal.pointsto.AbstractAnalysisEngine;
 import com.oracle.graal.pointsto.ClassInclusionPolicy;
 import com.oracle.graal.pointsto.api.HostVM;
@@ -58,7 +60,6 @@ import jdk.vm.ci.meta.ConstantReflectionProvider;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.ResolvedJavaField;
-import org.graalvm.collections.EconomicSet;
 
 /**
  * Core class of the Reachability Analysis. Contains the crucial part: resolving virtual methods.

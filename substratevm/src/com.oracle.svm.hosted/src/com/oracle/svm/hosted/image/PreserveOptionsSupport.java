@@ -60,12 +60,13 @@ import com.oracle.graal.pointsto.ClassInclusionPolicy;
 import com.oracle.graal.pointsto.ClassInclusionPolicy.DefaultAllInclusionPolicy;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.jdk.localization.BundleContentSubstitutedLocalizationSupport;
-import com.oracle.svm.core.option.AccumulatingLocatableMultiOptionValue;
-import com.oracle.svm.core.option.LocatableMultiOptionValue;
-import com.oracle.svm.core.option.SubstrateOptionsParser;
 import com.oracle.svm.core.util.UserError;
+import com.oracle.svm.hosted.GuestTypes;
 import com.oracle.svm.hosted.NativeImageClassLoaderSupport;
 import com.oracle.svm.hosted.driver.IncludeOptionsSupport;
+import com.oracle.svm.shared.option.AccumulatingLocatableMultiOptionValue;
+import com.oracle.svm.shared.option.LocatableMultiOptionValue;
+import com.oracle.svm.shared.option.SubstrateOptionsParser;
 import com.oracle.svm.util.JVMCIReflectionUtil;
 import com.oracle.svm.util.OriginalClassProvider;
 
@@ -204,11 +205,11 @@ public class PreserveOptionsSupport extends IncludeOptionsSupport {
         return t2Depth - t1Depth;
     };
 
-    public static void registerPreservedClasses(BigBang bb, NativeImageClassLoaderSupport classLoaderSupport) {
+    public static void registerPreservedClasses(BigBang bb, GuestTypes guestTypes) {
         Set<String> classesOrPackagesToIgnore = SubstrateOptions.IgnorePreserveForClasses.getValue().valuesAsSet();
         ClassInclusionPolicy classInclusionPolicy = new DefaultAllInclusionPolicy("included by " + SubstrateOptionsParser.commandArgument(Preserve, ""));
         classInclusionPolicy.setBigBang(bb);
-        var classesToPreserve = classLoaderSupport.getClassesToPreserve()
+        var classesToPreserve = guestTypes.getTypesToPreserve()
                         .filter(classInclusionPolicy::isOriginalTypeIncluded)
                         .filter(t -> !(classesOrPackagesToIgnore.contains(JVMCIReflectionUtil.getPackageName(t)) || classesOrPackagesToIgnore.contains(t.toClassName())))
                         .sorted(PRESERVED_CLASSES_COMPARATOR)
@@ -278,12 +279,16 @@ public class PreserveOptionsSupport extends IncludeOptionsSupport {
          * upwards multiple times when caching is implemented.
          */
         classesToPreserve.reversed().forEach(c -> {
-            reflection.register(always, false, true, c.getFields());
-            reflection.register(always, true, c.getMethods());
+            try {
+                reflection.register(always, false, true, c.getFields());
+                reflection.register(always, true, c.getMethods());
+            } catch (LinkageError e) {
+                /* If we can't link we can not register fields and methods */
+            }
             serialization.register(always, true, c);
         });
 
-        for (String className : classLoaderSupport.getClassNamesToPreserve()) {
+        for (String className : guestTypes.getClassNamesToPreserve()) {
             if (!classesOrPackagesToIgnore.contains(className)) {
                 reflection.registerClassLookup(always, true, className);
             }
@@ -293,9 +298,12 @@ public class PreserveOptionsSupport extends IncludeOptionsSupport {
     public static void registerType(RuntimeReflectionSupport reflection, Class<?> c) {
         AccessCondition always = AccessCondition.unconditional();
         reflection.register(always, true, c);
-
-        reflection.register(always, false, true, c.getDeclaredFields());
-        reflection.register(always, true, c.getDeclaredMethods());
-        reflection.register(always, true, c.getDeclaredConstructors());
+        try {
+            reflection.register(always, false, true, c.getDeclaredFields());
+            reflection.register(always, true, c.getDeclaredMethods());
+            reflection.register(always, true, c.getDeclaredConstructors());
+        } catch (LinkageError e) {
+            /* If we can't link we can not register fields and methods */
+        }
     }
 }

@@ -47,6 +47,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
+import com.oracle.svm.core.BuilderUtil;
 import org.graalvm.nativeimage.AnnotationAccess;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
@@ -58,7 +59,6 @@ import com.oracle.graal.pointsto.infrastructure.SubstitutionProcessor;
 import com.oracle.graal.pointsto.meta.AnalysisField;
 import com.oracle.graal.pointsto.meta.AnalysisUniverse;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.SubstrateUtil;
 import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.AnnotateOriginal;
 import com.oracle.svm.core.annotate.Delete;
@@ -77,7 +77,6 @@ import com.oracle.svm.core.fieldvaluetransformer.FieldOffsetFieldValueTransforme
 import com.oracle.svm.core.fieldvaluetransformer.NewInstanceOfFixedClassFieldValueTransformer;
 import com.oracle.svm.core.fieldvaluetransformer.StaticFieldBaseFieldValueTransformer;
 import com.oracle.svm.core.hub.DynamicHub;
-import com.oracle.svm.core.option.SubstrateOptionsParser;
 import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.hosted.ImageClassLoader;
 import com.oracle.svm.hosted.NativeImageGenerator;
@@ -88,14 +87,15 @@ import com.oracle.svm.hosted.ameta.FieldValueInterceptionSupport;
 import com.oracle.svm.hosted.ameta.FieldValueInterceptionSupport.WrappedFieldValueTransformer;
 import com.oracle.svm.hosted.classinitialization.ClassInitializationSupport;
 import com.oracle.svm.hosted.meta.HostedUniverse;
+import com.oracle.svm.shared.option.SubstrateOptionsParser;
+import com.oracle.svm.shared.util.ReflectionUtil;
+import com.oracle.svm.shared.util.ReflectionUtil.ReflectionUtilError;
 import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.util.AnnotationUtil;
 import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.JVMCIFieldValueTransformer;
 import com.oracle.svm.util.JVMCIReflectionUtil;
 import com.oracle.svm.util.OriginalClassProvider;
-import com.oracle.svm.shared.util.ReflectionUtil;
-import com.oracle.svm.shared.util.ReflectionUtil.ReflectionUtilError;
 
 import jdk.internal.reflect.Reflection;
 import jdk.vm.ci.meta.MetaAccessProvider;
@@ -197,7 +197,7 @@ public class AnnotationSubstitutionProcessor extends SubstitutionProcessor {
                  * requested dimension has not yet been created. The registered substitution is the
                  * original type that the alias is pointing to.
                  */
-                int dimension = SubstrateUtil.arrayTypeDimension(type);
+                int dimension = BuilderUtil.arrayTypeDimension(type);
 
                 /*
                  * Eagerly register all array types of dimensions up to the required type dimension.

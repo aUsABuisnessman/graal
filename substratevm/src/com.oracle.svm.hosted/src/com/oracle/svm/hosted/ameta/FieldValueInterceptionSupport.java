@@ -53,7 +53,6 @@ import com.oracle.svm.core.heap.UnknownObjectField;
 import com.oracle.svm.core.heap.UnknownPrimitiveField;
 import com.oracle.svm.core.layered.LayeredFieldValue;
 import com.oracle.svm.core.util.UserError;
-import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.hosted.analysis.FieldValueComputer;
 import com.oracle.svm.hosted.imagelayer.HostedImageLayerBuildingSupport;
 import com.oracle.svm.hosted.imagelayer.LayeredFieldValueTransformerImpl;
@@ -61,13 +60,18 @@ import com.oracle.svm.hosted.imagelayer.LayeredFieldValueTransformerSupport;
 import com.oracle.svm.hosted.substitute.AnnotationSubstitutionProcessor;
 import com.oracle.svm.hosted.substitute.AutomaticUnsafeTransformationSupport;
 import com.oracle.svm.hosted.substitute.FieldValueTransformation;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.PartiallyLayerAware;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
+import com.oracle.svm.shared.util.ClassUtil;
+import com.oracle.svm.shared.util.ReflectionUtil;
+import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.util.AnnotationUtil;
-import com.oracle.svm.util.ClassUtil;
 import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.JVMCIFieldValueTransformer;
 import com.oracle.svm.util.OriginalClassProvider;
 import com.oracle.svm.util.OriginalFieldProvider;
-import com.oracle.svm.shared.util.ReflectionUtil;
 
 import jdk.graal.compiler.debug.Assertions;
 import jdk.graal.compiler.nodes.ValueNode;
@@ -93,6 +97,7 @@ import jdk.vm.ci.meta.ResolvedJavaType;
  * whose value is only available after static analysis. Once the value is available, it is read as
  * usual from the hosted HotSpot field without any further transformation.
  */
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = PartiallyLayerAware.class)
 public final class FieldValueInterceptionSupport {
     private static final Object INTERCEPTOR_ACCESSED_MARKER = new Object();
 

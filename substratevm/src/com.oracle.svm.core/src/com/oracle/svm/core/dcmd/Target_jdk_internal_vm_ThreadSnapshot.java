@@ -29,7 +29,7 @@ package com.oracle.svm.core.dcmd;
 import java.lang.Thread.State;
 import java.util.concurrent.locks.LockSupport;
 
-import com.oracle.svm.core.SubstrateUtil;
+import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.annotate.Inject;
@@ -42,7 +42,7 @@ import com.oracle.svm.core.thread.JavaThreads;
 import com.oracle.svm.core.thread.JavaVMOperation;
 import com.oracle.svm.core.thread.Target_java_lang_VirtualThread;
 import com.oracle.svm.core.thread.VMOperation;
-import com.oracle.svm.core.util.BasedOnJDKFile;
+import com.oracle.svm.shared.util.BasedOnJDKFile;
 
 @TargetClass(className = "jdk.internal.vm.ThreadSnapshot")
 final class Target_jdk_internal_vm_ThreadSnapshot {

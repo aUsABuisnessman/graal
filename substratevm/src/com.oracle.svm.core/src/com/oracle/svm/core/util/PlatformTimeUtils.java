@@ -24,11 +24,12 @@
  */
 package com.oracle.svm.core.util;
 
+import com.oracle.svm.shared.util.BasedOnJDKFile;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 
-import com.oracle.svm.guest.staging.Uninterruptible;
+import com.oracle.svm.shared.Uninterruptible;
 
 /**
  * Platform dependent time related utils. See also {@link TimeUtils} for platform independent utils.

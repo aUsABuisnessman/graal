@@ -39,8 +39,8 @@ import com.oracle.svm.util.OriginalClassProvider;
 import com.oracle.graal.pointsto.infrastructure.SubstitutionProcessor;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.meta.BaseLayerType;
-import com.oracle.svm.core.SubstrateUtil;
-import com.oracle.svm.core.util.BasedOnJDKClass;
+import com.oracle.svm.shared.util.SubstrateUtil;
+import com.oracle.svm.shared.util.BasedOnJDKClass;
 import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.shared.util.ReflectionUtil;
 
