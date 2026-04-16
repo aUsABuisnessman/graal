@@ -74,7 +74,7 @@ import com.oracle.svm.core.MissingRegistrationUtils;
 import com.oracle.svm.core.ParsingReason;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.configure.ConfigurationFiles;
-import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
+import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.jdk.Resources;
 import com.oracle.svm.core.jdk.resources.NativeImageResourceFileAttributes;
@@ -404,7 +404,7 @@ public class ResourcesFeature implements InternalFeature {
         resourcesRegistry = new ResourcesRegistryImpl();
         ImageSingletons.add(ResourcesRegistry.class, resourcesRegistry);
         ImageSingletons.add(RuntimeResourceSupport.class, resourcesRegistry);
-        EmbeddedResourcesInfo embeddedResourcesInfo = new EmbeddedResourcesInfo();
+        EmbeddedResourcesInfo embeddedResourcesInfo = new EmbeddedResourcesInfo(collectEmbeddedResourcesInfo());
         ImageSingletons.add(EmbeddedResourcesInfo.class, embeddedResourcesInfo);
     }
 
@@ -666,7 +666,7 @@ public class ResourcesFeature implements InternalFeature {
     public void afterAnalysis(AfterAnalysisAccess access) {
         resourcesRegistry.seal();
         if (Options.GenerateEmbeddedResourcesFile.getValue()) {
-            Path reportLocation = NativeImageGenerator.generatedFiles(HostedOptionValues.singleton()).resolve(Options.EMBEDDED_RESOURCES_FILE_NAME);
+            Path reportLocation = NativeImageGenerator.generatedFiles(HostedOptionValues.singleton().get()).resolve(Options.EMBEDDED_RESOURCES_FILE_NAME);
             try (JsonWriter writer = new JsonWriter(reportLocation)) {
                 EmbeddedResourceExporter.printReport(writer);
             } catch (IOException e) {

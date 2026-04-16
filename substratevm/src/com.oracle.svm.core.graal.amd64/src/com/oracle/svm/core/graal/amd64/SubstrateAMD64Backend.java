@@ -53,9 +53,9 @@ import com.oracle.svm.core.FrameAccess;
 import com.oracle.svm.core.ReservedRegisters;
 import com.oracle.svm.core.SubstrateControlFlowIntegrity;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.shared.util.SubstrateUtil;
+import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.amd64.AMD64CPUFeatureAccess;
-import com.oracle.svm.core.config.ConfigurationValues;
+import com.oracle.svm.core.config.ObjectLayout;
 import com.oracle.svm.core.cpufeature.Stubs;
 import com.oracle.svm.core.deopt.DeoptimizationRuntime;
 import com.oracle.svm.core.deopt.DeoptimizationSupport;
@@ -65,6 +65,7 @@ import com.oracle.svm.core.graal.code.AssignedLocation;
 import com.oracle.svm.core.graal.code.PatchConsumerFactory;
 import com.oracle.svm.core.graal.code.SharedCompilationResult;
 import com.oracle.svm.core.graal.code.StubCallingConvention;
+import com.oracle.svm.core.graal.code.SubstrateBackend;
 import com.oracle.svm.core.graal.code.SubstrateBackendWithAssembler;
 import com.oracle.svm.core.graal.code.SubstrateCallingConvention;
 import com.oracle.svm.core.graal.code.SubstrateCallingConventionKind;
@@ -99,6 +100,7 @@ import com.oracle.svm.core.nodes.SubstrateIndirectCallTargetNode;
 import com.oracle.svm.core.pltgot.GOTAccess;
 import com.oracle.svm.core.pltgot.PLTGOTConfiguration;
 import com.oracle.svm.core.thread.VMThreads.StatusSupport;
+import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.asm.BranchTargetOutOfBoundsException;
@@ -189,7 +191,9 @@ import jdk.graal.compiler.nodes.spi.NodeLIRBuilderTool;
 import jdk.graal.compiler.nodes.spi.NodeValueMap;
 import jdk.graal.compiler.options.OptionValues;
 import jdk.graal.compiler.phases.BasePhase;
+import jdk.graal.compiler.phases.PreLIRGraphVerifier;
 import jdk.graal.compiler.phases.common.AddressLoweringByNodePhase;
+import jdk.graal.compiler.phases.constantblinding.ConstantBlindingInstance;
 import jdk.graal.compiler.phases.util.Providers;
 import jdk.graal.compiler.replacements.amd64.AMD64IntrinsicStubs;
 import jdk.graal.compiler.vector.lir.amd64.AMD64SimdLIRKindTool;
@@ -879,7 +883,7 @@ public class SubstrateAMD64Backend extends SubstrateBackendWithAssembler<AMD64Ma
 
         @Override
         public int getArrayLengthOffset() {
-            return ConfigurationValues.getObjectLayout().getArrayLengthOffset();
+            return ObjectLayout.singleton().getArrayLengthOffset();
         }
 
         @Override
@@ -1321,6 +1325,15 @@ public class SubstrateAMD64Backend extends SubstrateBackendWithAssembler<AMD64Ma
         }
 
         protected void makeFrame(CompilationResultBuilder crb, AMD64MacroAssembler asm) {
+            if (SubstrateBackend.shouldRandomizeRuntimeCodeOffset(method)) {
+                SubstrateBackend.randomizeRuntimeCodeOffset(crb, offset -> {
+                    /* The actual code start should be word aligned to avoid slow execution. */
+                    int alignedOffset = NumUtil.roundUp(offset, SubstrateTarget.getWordSize());
+                    for (int i = 0; i < alignedOffset; i++) {
+                        asm.int3();
+                    }
+                });
+            }
             asm.maybeEmitIndirectTargetMarker();
             reserveStackFrame(crb, asm);
         }
@@ -1656,7 +1669,7 @@ public class SubstrateAMD64Backend extends SubstrateBackendWithAssembler<AMD64Ma
                  * WARNING: must NOT have side effects. Preserve the flags register!
                  */
                 Register resultReg = getResultRegister();
-                int referenceSize = ConfigurationValues.getObjectLayout().getReferenceSize();
+                int referenceSize = ObjectLayout.singleton().getReferenceSize();
                 Constant inputConstant = asConstantValue(getInput()).getConstant();
                 if (masm.inlineObjects()) {
                     crb.recordInlineDataInCode(inputConstant);
@@ -1836,12 +1849,12 @@ public class SubstrateAMD64Backend extends SubstrateBackendWithAssembler<AMD64Ma
     }
 
     protected static boolean isVectorizationTarget() {
-        return ((AMD64) ConfigurationValues.getTarget().arch).getFeatures().contains(AMD64.CPUFeature.AVX);
+        return ((AMD64) SubstrateTarget.getArchitecture()).getFeatures().contains(AMD64.CPUFeature.AVX);
     }
 
     protected AMD64ArithmeticLIRGenerator createArithmeticLIRGen(RegisterValue nullRegisterValue) {
         if (isVectorizationTarget()) {
-            return AMD64VectorArithmeticLIRGenerator.create(nullRegisterValue, ConfigurationValues.getTarget().arch);
+            return AMD64VectorArithmeticLIRGenerator.create(nullRegisterValue, SubstrateTarget.getArchitecture());
         } else {
             return new AMD64ArithmeticLIRGenerator(nullRegisterValue);
         }
@@ -1851,7 +1864,8 @@ public class SubstrateAMD64Backend extends SubstrateBackendWithAssembler<AMD64Ma
         SharedMethod method = ((SubstrateLIRGenerationResult) lirGenRes).getMethod();
         AMD64MoveFactoryBase factory = new SubstrateAMD64MoveFactory(backupSlotProvider, method, createLirKindTool());
         if (isVectorizationTarget()) {
-            factory = new AMD64VectorMoveFactory(factory, backupSlotProvider, AMD64Assembler.AMD64SIMDInstructionEncoding.forFeatures(((AMD64) ConfigurationValues.getTarget().arch).getFeatures()));
+            factory = new AMD64VectorMoveFactory(factory, backupSlotProvider,
+                            AMD64Assembler.AMD64SIMDInstructionEncoding.forFeatures(((AMD64) SubstrateTarget.getArchitecture()).getFeatures()));
         }
         return factory;
     }
@@ -1951,6 +1965,7 @@ public class SubstrateAMD64Backend extends SubstrateBackendWithAssembler<AMD64Ma
 
     @Override
     public NodeLIRBuilderTool newNodeLIRBuilder(StructuredGraph graph, LIRGeneratorTool lirGen) {
+        assert PreLIRGraphVerifier.createInstance(graph.getOptions()).verify(graph) : "Graph must verify pre LIR";
         AMD64NodeMatchRules nodeMatchRules = createMatchRules(lirGen);
         return new SubstrateAMD64NodeLIRBuilder(graph, lirGen, nodeMatchRules);
     }
@@ -1965,6 +1980,9 @@ public class SubstrateAMD64Backend extends SubstrateBackendWithAssembler<AMD64Ma
         LIR lir = lirGenResult.getLIR();
         OptionValues options = lir.getOptions();
         AMD64MacroAssembler masm = createAssembler(options);
+        if (!SubstrateUtil.HOSTED && ConstantBlindingInstance.shouldForce4ByteDisplacements(options)) {
+            masm.setForce4ByteNonZeroDisplacements(true);
+        }
         PatchConsumerFactory patchConsumerFactory;
         if (SubstrateUtil.HOSTED) {
             patchConsumerFactory = PatchConsumerFactory.HostedPatchConsumerFactory.factory();
@@ -1995,7 +2013,7 @@ public class SubstrateAMD64Backend extends SubstrateBackendWithAssembler<AMD64Ma
 
     @Override
     protected AMD64MacroAssembler createAssembler(OptionValues options) {
-        return new AMD64MacroAssembler(getTarget(), options, true);
+        return new SubstrateAMD64MacroAssembler(getTarget(), options, true);
     }
 
     protected FrameContext createFrameContext(SharedMethod method, Deoptimizer.StubType stubType, CallingConvention callingConvention) {
@@ -2009,6 +2027,12 @@ public class SubstrateAMD64Backend extends SubstrateBackendWithAssembler<AMD64Ma
             case InterpreterLeaveStub -> {
                 assert InterpreterSupport.isEnabled();
                 yield new AMD64InterpreterStubs.InterpreterLeaveStubContext(method, callingConvention);
+            }
+            case InterpreterDeoptEntryPointStub -> {
+                assert InterpreterSupport.isEnabled();
+                assert SubstrateOptions.useRistretto();
+                yield new AMD64InterpreterStubs.InterpreterEntryPointStubFrameContext(method, callingConvention);
+
             }
             case NoDeoptStub -> new SubstrateAMD64FrameContext(method, callingConvention);
         };

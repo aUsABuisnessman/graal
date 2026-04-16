@@ -501,6 +501,21 @@ public final class GuestAccess implements VMAccess {
     }
 
     @Override
+    public JavaConstant createPrimitiveArray(JavaKind kind, int length) {
+        return delegate.createPrimitiveArray(kind, length);
+    }
+
+    @Override
+    public JavaConstant clonePrimitiveArray(JavaConstant primitiveArray) {
+        return delegate.clonePrimitiveArray(primitiveArray);
+    }
+
+    @Override
+    public void copyArray(JavaConstant src, int srcPos, JavaConstant dest, int destPos, int length) {
+        delegate.copyArray(src, srcPos, dest, destPos, length);
+    }
+
+    @Override
     public void writeArrayElement(JavaConstant array, int index, JavaConstant element) {
         delegate.writeArrayElement(array, index, element);
     }
@@ -568,6 +583,11 @@ public final class GuestAccess implements VMAccess {
     @Override
     public void copyMemory(JavaConstant src, int srcFrom, int srcTo, byte[] dst, int dstFrom) {
         delegate.copyMemory(src, srcFrom, srcTo, dst, dstFrom);
+    }
+
+    @Override
+    public JavaConstant readPrimitiveArrayUnaligned(JavaConstant array, JavaKind kind, int offset) {
+        return delegate.readPrimitiveArrayUnaligned(array, kind, offset);
     }
 
     @Override

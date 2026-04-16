@@ -36,7 +36,6 @@ local devkits = graal_common.devkits;
   common_vm: graal_common.build_base + vm.vm_setup + {
     python_version: "3",
     logs+: [
-      '*/mxbuild/dists/stripped/*.map',
       '**/install.packages.R.log',
     ],
   },
@@ -95,8 +94,8 @@ local devkits = graal_common.devkits;
 
   vm_darwin_aarch64: self.common_vm_darwin + graal_common.darwin_aarch64 + {
     environment+: {
-      # for compatibility with macOS BigSur
-      MACOSX_DEPLOYMENT_TARGET: '11.0',
+      # for compatibility with macOS Sonoma
+      MACOSX_DEPLOYMENT_TARGET: '14.0',
     },
   },
 
@@ -119,10 +118,10 @@ local devkits = graal_common.devkits;
   // svm_common includes the dependencies for all platforms besides windows amd64
   svm_common_windows_amd64(jdk): graal_common.deps.svm + graal_common.devkits["windows-jdk" + jdk],
 
-  maven_deploy_sdk:      ['--suite', 'sdk', 'maven-deploy', '--validate', 'none', '--all-distribution-types', '--with-suite-revisions-metadata'],
+  maven_deploy_sdk:      ['--suite', 'sdk', '--', 'maven-deploy', '--validate', 'none', '--all-distribution-types', '--with-suite-revisions-metadata'],
   deploy_artifacts_sdk(os, base_dist_name=null): (if base_dist_name != null then ['--base-dist-name=' + base_dist_name] else []) + ['--suite', 'sdk', 'deploy-artifacts', '--uploader', if os == 'windows' then 'artifact_uploader.cmd' else 'artifact_uploader'],
 
-  maven_deploy_all_suites: ['maven-deploy', '--all-suites', '--validate', 'none', '--all-distribution-types', '--with-suite-revisions-metadata'],
+  maven_deploy_all_suites: ['--', 'maven-deploy', '--all-suites', '--validate', 'none', '--all-distribution-types', '--with-suite-revisions-metadata'],
   deploy_artifacts_all_suites(os): ['deploy-artifacts', '--all-suites', '--uploader', if os == 'windows' then 'artifact_uploader.cmd' else 'artifact_uploader'],
 
   # All 3 used in vm.jsonnet
@@ -276,7 +275,7 @@ local devkits = graal_common.devkits;
 
     pd_layouts_artifact_name(platform, dry_run):: 'pd-layouts-' + (if dry_run then 'dry-run-' else '') + platform,
 
-    mvn_args: ['maven-deploy', '--tags=public', '--all-distribution-types', '--validate=full', '--version-suite=vm'],
+    mvn_args: ['--', 'maven-deploy', '--tags=public', '--all-distribution-types', '--validate=full', '--version-suite=vm'],
     mvn_args_only_native: self.mvn_args + ['--all-suites', '--only', self.only_native_dists],
 
     compose_platform(os, arch):: os + '-' + arch,
@@ -566,7 +565,7 @@ local devkits = graal_common.devkits;
   {
     local name = "graalvm-jdklatest-" + vm + "-" + os + "-" + arch,
     local env = vm,
-    local mx = ["mx", "--strip-jars", "--env", env],
+    local mx = ["mx", "--env", env],
     name: "build-" + name,
     run+: [
       ["cd", repo_config.vm.suite_dir],
@@ -581,9 +580,6 @@ local devkits = graal_common.devkits;
         dir: "../artifacts",
         patterns: ["*"],
       },
-    ],
-    logs+: [
-      "*/mxbuild/dists/stripped/*.map",
     ],
     targets: ["ondemand"],
     timelimit: "0:30:00",
@@ -606,7 +602,7 @@ local devkits = graal_common.devkits;
     #
     # Gates
     #
-    vm.vm_java_Latest + graal_common.deps.eclipse + graal_common.deps.jdt + graal_common.deps.spotbugs + self.vm_base('linux', 'amd64', 'tier1') + galahad.exclude + {
+    vm.vm_java_Latest + graal_common.deps.jdt + graal_common.deps.spotbugs + self.vm_base('linux', 'amd64', 'tier1') + galahad.exclude + {
      run: [
        ['mx', 'gate', '-B=--force-deprecation-as-warning', '--tags', 'style,fullbuild'],
      ],

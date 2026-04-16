@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,8 +26,6 @@ package jdk.graal.compiler.hotspot.meta;
 
 import static jdk.graal.compiler.hotspot.HotSpotBackend.ARRAY_PARTITION;
 import static jdk.graal.compiler.hotspot.HotSpotBackend.ARRAY_SORT;
-import static jdk.graal.compiler.hotspot.HotSpotBackend.BASE64_DECODE_BLOCK;
-import static jdk.graal.compiler.hotspot.HotSpotBackend.BASE64_ENCODE_BLOCK;
 import static jdk.graal.compiler.hotspot.HotSpotBackend.CHACHA20Block;
 import static jdk.graal.compiler.hotspot.HotSpotBackend.CRC_TABLE_LOCATION;
 import static jdk.graal.compiler.hotspot.HotSpotBackend.DILITHIUM_ALMOST_INVERSE_NTT;
@@ -36,8 +34,6 @@ import static jdk.graal.compiler.hotspot.HotSpotBackend.DILITHIUM_DECOMPOSE_POLY
 import static jdk.graal.compiler.hotspot.HotSpotBackend.DILITHIUM_MONT_MUL_BY_CONSTANT;
 import static jdk.graal.compiler.hotspot.HotSpotBackend.DILITHIUM_NTT_MULT;
 import static jdk.graal.compiler.hotspot.HotSpotBackend.DOUBLE_KECCAK;
-import static jdk.graal.compiler.hotspot.HotSpotBackend.ELECTRONIC_CODEBOOK_DECRYPT_AESCRYPT;
-import static jdk.graal.compiler.hotspot.HotSpotBackend.ELECTRONIC_CODEBOOK_ENCRYPT_AESCRYPT;
 import static jdk.graal.compiler.hotspot.HotSpotBackend.GALOIS_COUNTER_MODE_CRYPT;
 import static jdk.graal.compiler.hotspot.HotSpotBackend.INTPOLY_ASSIGN;
 import static jdk.graal.compiler.hotspot.HotSpotBackend.INTPOLY_MONTGOMERYMULT_P256;
@@ -297,7 +293,6 @@ public class HotSpotGraphBuilderPlugins {
                 registerBigIntegerPlugins(invocationPlugins, config);
                 registerSHAPlugins(invocationPlugins, config);
                 registerMLPlugins(invocationPlugins, config);
-                registerBase64Plugins(invocationPlugins, config, metaAccess);
                 registerUnsafePlugins(invocationPlugins, config);
                 registerArrayPlugins(invocationPlugins, config);
                 registerStringPlugins(invocationPlugins, wordTypes, foreignCalls, config);
@@ -982,28 +977,15 @@ public class HotSpotGraphBuilderPlugins {
         }
     }
 
-    public abstract static class ElectronicCodeBookCryptPlugin extends AESCryptDelegatePlugin {
+    public static class HotSpotElectronicCodeBookCryptPlugin extends StandardGraphBuilderPlugins.ElectronicCodeBookCryptPlugin {
 
-        ElectronicCodeBookCryptPlugin(CryptMode mode) {
-            super(mode, mode.isEncrypt() ? "implECBEncrypt" : "implECBDecrypt",
-                            Receiver.class, byte[].class, int.class, int.class, byte[].class, int.class);
+        HotSpotElectronicCodeBookCryptPlugin(CryptMode mode) {
+            super(mode);
         }
 
         @Override
-        public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode in, ValueNode inOffset, ValueNode len, ValueNode out, ValueNode outOffset) {
-            try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
-                ResolvedJavaType receiverType = targetMethod.getDeclaringClass();
-                ResolvedJavaType typeAESCrypt = getTypeAESCrypt(b.getMetaAccess(), receiverType);
-
-                ValueNode nonNullReceiver = receiver.get(true);
-                ValueNode inAddr = helper.arrayElementPointer(in, JavaKind.Byte, inOffset);
-                ValueNode outAddr = helper.arrayElementPointer(out, JavaKind.Byte, outOffset);
-                ValueNode kAddr = readEmbeddedAESCryptKArrayStart(b, helper, receiverType, typeAESCrypt, nonNullReceiver);
-                ForeignCallNode call = new ForeignCallNode(mode.isEncrypt() ? ELECTRONIC_CODEBOOK_ENCRYPT_AESCRYPT : ELECTRONIC_CODEBOOK_DECRYPT_AESCRYPT,
-                                inAddr, outAddr, kAddr, len);
-                helper.emitFinalReturn(JavaKind.Int, call);
-                return true;
-            }
+        protected boolean canApply(GraphBuilderContext b) {
+            return true;
         }
 
         @Override
@@ -1073,18 +1055,8 @@ public class HotSpotGraphBuilderPlugins {
         r.register(new HotSpotCipherBlockChainingCryptPlugin(CryptMode.DECRYPT));
 
         r = new Registration(plugins, "com.sun.crypto.provider.ElectronicCodeBook");
-        r.register(new ElectronicCodeBookCryptPlugin(CryptMode.ENCRYPT) {
-            @Override
-            public boolean isApplicable(Architecture arch) {
-                return config.electronicCodeBookEncrypt != 0L;
-            }
-        });
-        r.register(new ElectronicCodeBookCryptPlugin(CryptMode.DECRYPT) {
-            @Override
-            public boolean isApplicable(Architecture arch) {
-                return config.electronicCodeBookDecrypt != 0L;
-            }
-        });
+        r.register(new HotSpotElectronicCodeBookCryptPlugin(CryptMode.ENCRYPT));
+        r.register(new HotSpotElectronicCodeBookCryptPlugin(CryptMode.DECRYPT));
 
         r = new Registration(plugins, "com.sun.crypto.provider.GaloisCounterMode");
         r.register(new GaloisCounterModeCryptPlugin() {
@@ -1542,52 +1514,6 @@ public class HotSpotGraphBuilderPlugins {
             @Override
             public boolean isApplicable(Architecture arch) {
                 return config.stubKyberBarrettReduce != 0L;
-            }
-        });
-    }
-
-    private static void registerBase64Plugins(InvocationPlugins plugins, GraalHotSpotVMConfig config, MetaAccessProvider metaAccess) {
-        Registration r = new Registration(plugins, "java.util.Base64$Encoder");
-        r.register(new ConditionalInvocationPlugin("encodeBlock", Receiver.class, byte[].class, int.class, int.class, byte[].class, int.class, boolean.class) {
-            @Override
-            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode src,
-                            ValueNode sp, ValueNode sl, ValueNode dst, ValueNode dp, ValueNode isURL) {
-                if (receiver != null) {
-                    // Side effect of call below is to add a receiver null check if required
-                    receiver.get(true);
-                }
-                int byteArrayBaseOffset = metaAccess.getArrayBaseOffset(JavaKind.Byte);
-                ComputeObjectAddressNode srcAddress = b.add(new ComputeObjectAddressNode(src, ConstantNode.forInt(byteArrayBaseOffset)));
-                ComputeObjectAddressNode dstAddress = b.add(new ComputeObjectAddressNode(dst, ConstantNode.forInt(byteArrayBaseOffset)));
-                b.add(new ForeignCallNode(BASE64_ENCODE_BLOCK, srcAddress, sp, sl, dstAddress, dp, isURL));
-                return true;
-            }
-
-            @Override
-            public boolean isApplicable(Architecture arch) {
-                return config.base64EncodeBlock != 0L;
-            }
-        });
-        r = new Registration(plugins, "java.util.Base64$Decoder");
-        r.register(new ConditionalInvocationPlugin("decodeBlock", Receiver.class, byte[].class, int.class, int.class, byte[].class, int.class, boolean.class, boolean.class) {
-            @Override
-            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode src,
-                            ValueNode sp, ValueNode sl, ValueNode dst, ValueNode dp, ValueNode isURL, ValueNode isMime) {
-                if (receiver != null) {
-                    // Side effect of call below is to add a receiver null check if required
-                    receiver.get(true);
-                }
-                int byteArrayBaseOffset = metaAccess.getArrayBaseOffset(JavaKind.Byte);
-                ComputeObjectAddressNode srcAddress = b.add(new ComputeObjectAddressNode(src, ConstantNode.forInt(byteArrayBaseOffset)));
-                ComputeObjectAddressNode dstAddress = b.add(new ComputeObjectAddressNode(dst, ConstantNode.forInt(byteArrayBaseOffset)));
-                ForeignCallNode call = new ForeignCallNode(BASE64_DECODE_BLOCK, srcAddress, sp, sl, dstAddress, dp, isURL, isMime);
-                b.addPush(JavaKind.Int, call);
-                return true;
-            }
-
-            @Override
-            public boolean isApplicable(Architecture arch) {
-                return config.base64DecodeBlock != 0L;
             }
         });
     }

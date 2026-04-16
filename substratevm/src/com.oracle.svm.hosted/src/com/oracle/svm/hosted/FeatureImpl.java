@@ -77,7 +77,6 @@ import com.oracle.svm.common.meta.MethodVariant;
 import com.oracle.svm.core.LinkerInvocation;
 import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.feature.InternalFeature;
-import com.oracle.svm.core.graal.code.SubstrateBackend;
 import com.oracle.svm.core.graal.meta.RuntimeConfiguration;
 import com.oracle.svm.core.meta.SharedField;
 import com.oracle.svm.core.meta.SharedMethod;
@@ -102,6 +101,7 @@ import com.oracle.svm.hosted.reflect.ReflectionDataBuilder;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.util.AnnotationUtil;
+import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.JVMCIFieldValueTransformer;
 import com.oracle.svm.util.OriginalFieldProvider;
 import com.oracle.svm.util.dynamicaccess.JVMCIRuntimeReflection;
@@ -329,16 +329,22 @@ public class FeatureImpl {
         }
 
         public void rescanField(Object receiver, Field field, ScanReason reason) {
+            rescanField(receiver, getMetaAccess().getWrapped().lookupJavaField(field), reason);
+        }
+
+        public void rescanField(Object receiver, ResolvedJavaField field, ScanReason reason) {
+            VMError.guarantee(GuestAccess.get().owns(field),
+                            "The ResolvedJavaField %s must be the original field. Use OriginalFieldProvider.getOriginalField() to retrieve it.", field);
             getUniverse().getHeapScanner().rescanField(receiver, field, reason);
         }
 
         public void rescanRoot(Field field, ScanReason reason) {
-            getUniverse().getHeapScanner().rescanRoot(field, reason);
+            getUniverse().getHeapScanner().rescanRoot(getMetaAccess().getWrapped().lookupJavaField(field), reason);
         }
 
         public void rescanRoot(ResolvedJavaField field, ScanReason reason) {
-            VMError.guarantee(!(field instanceof OriginalFieldProvider),
-                            "The ResolvedJavaField %s must be the original (Host VM) field. You can use OriginalFieldProvider.getOriginalField() to retrieve that", field);
+            VMError.guarantee(GuestAccess.get().owns(field),
+                            "The ResolvedJavaField %s must be the original field. Use OriginalFieldProvider.getOriginalField() to retrieve it.", field);
             getUniverse().getHeapScanner().rescanRoot(field, reason);
         }
 
@@ -701,7 +707,11 @@ public class FeatureImpl {
          * @see SVMHost#allowStableFieldFoldingBeforeAnalysis
          */
         public void allowStableFieldFoldingBeforeAnalysis(Field field) {
-            getHostVM().allowStableFieldFoldingBeforeAnalysis(getMetaAccess().lookupJavaField(field));
+            allowStableFieldFoldingBeforeAnalysis(getMetaAccess().lookupJavaField(field));
+        }
+
+        public void allowStableFieldFoldingBeforeAnalysis(ResolvedJavaField field) {
+            getHostVM().allowStableFieldFoldingBeforeAnalysis(field instanceof AnalysisField analysisField ? analysisField : getUniverse().lookup(field));
         }
     }
 
@@ -846,6 +856,10 @@ public class FeatureImpl {
             return (HostedMetaAccess) getProviders().getMetaAccess();
         }
 
+        public RuntimeConfiguration getRuntimeConfiguration() {
+            return runtimeConfiguration;
+        }
+
         public Providers getProviders() {
             return runtimeConfiguration.getProviders();
         }
@@ -878,9 +892,6 @@ public class FeatureImpl {
             super(featureHandler, imageClassLoader, aUniverse, hUniverse, heap, debugContext, runtimeConfiguration, nativeLibraries);
         }
 
-        public RuntimeConfiguration getRuntimeConfiguration() {
-            return runtimeConfiguration;
-        }
     }
 
     public static class AfterCompilationAccessImpl extends CompilationAccessImpl implements Feature.AfterCompilationAccess {
@@ -1004,23 +1015,16 @@ public class FeatureImpl {
 
     public static class AfterAbstractImageCreationAccessImpl extends HostedFeatureAccessImpl implements InternalFeature.AfterAbstractImageCreationAccess {
         protected final AbstractImage abstractImage;
-        protected final SubstrateBackend substrateBackend;
         private final HostedMetaAccess hMetaAccess;
 
-        AfterAbstractImageCreationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, HostedMetaAccess hMetaAccess, DebugContext debugContext, AbstractImage abstractImage,
-                        SubstrateBackend substrateBackend) {
+        AfterAbstractImageCreationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, HostedMetaAccess hMetaAccess, DebugContext debugContext, AbstractImage abstractImage) {
             super(featureHandler, imageClassLoader, debugContext);
             this.abstractImage = abstractImage;
-            this.substrateBackend = substrateBackend;
             this.hMetaAccess = hMetaAccess;
         }
 
         public AbstractImage getImage() {
             return abstractImage;
-        }
-
-        public SubstrateBackend getSubstrateBackend() {
-            return substrateBackend;
         }
 
         @Override

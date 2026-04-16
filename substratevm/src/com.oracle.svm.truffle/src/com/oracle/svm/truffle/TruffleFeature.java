@@ -101,6 +101,11 @@ import java.util.function.ToLongBiFunction;
 import java.util.function.ToLongFunction;
 import java.util.function.UnaryOperator;
 
+import com.oracle.svm.shared.AlwaysInline;
+import com.oracle.svm.core.annotate.Substitute;
+import com.oracle.svm.core.annotate.TargetElement;
+import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.core.stack.StackOverflowCheck;
 import org.graalvm.collections.EconomicSet;
 import org.graalvm.collections.Pair;
 import org.graalvm.nativeimage.AnnotationAccess;
@@ -189,6 +194,8 @@ import jdk.vm.ci.meta.MetaAccessProvider;
 import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
+import org.graalvm.word.Pointer;
+import org.graalvm.word.impl.Word;
 
 /**
  * Feature that enables compilation of Truffle ASTs to machine code. This feature requires
@@ -1093,7 +1100,7 @@ public class TruffleFeature implements InternalFeature {
          * Please keep this code in sync with the HotSpot configuration in
          * TruffleCommunityCompilerConfiguration.
          */
-        if (hosted && HostInliningPhase.Options.TruffleHostInlining.getValue(HostedOptionValues.singleton()) && suites.getHighTier() instanceof HighTier) {
+        if (hosted && HostInliningPhase.Options.TruffleHostInlining.getValue(HostedOptionValues.singleton().get()) && suites.getHighTier() instanceof HighTier) {
             SubstrateHostInliningPhase hostInliningPhase = new SubstrateHostInliningPhase(CanonicalizerPhase.create());
             var position = suites.getHighTier().findPhase(SubstrateOutlineBytecodeHandlerPhase.class);
             if (position != null) {
@@ -1112,6 +1119,18 @@ public class TruffleFeature implements InternalFeature {
          */
         if (!hosted && suites.getMidTier().findPhase(InsertGuardFencesPhase.class, true) == null) {
             suites.getMidTier().appendPhase(new InsertGuardFencesPhase());
+        }
+    }
+}
+
+final class HasStackSpaceCheck implements Predicate<Class<?>> {
+    @Override
+    public boolean test(Class<?> aClass) {
+        try {
+            aClass.getDeclaredMethod("ensureStackSpace", long.class);
+            return true;
+        } catch (NoSuchMethodException nsm) {
+            return false;
         }
     }
 }
@@ -1152,6 +1171,18 @@ final class Target_com_oracle_truffle_runtime_OptimizedCallTarget {
         @Override
         public Object transform(Object receiver, Object originalValue) {
             return true;
+        }
+    }
+
+    @Substitute
+    @TargetElement(onlyWith = HasStackSpaceCheck.class)
+    @AlwaysInline(value = "Performance critical")
+    private static void ensureStackSpace(long stackSpace) {
+        if (stackSpace > 0) {
+            Pointer topSP = KnownIntrinsics.readStackPointer().subtract(Word.unsigned(stackSpace));
+            if (StackOverflowCheck.singleton().getStackOverflowBoundary().aboveThan(topSP)) {
+                StackOverflowCheck.singleton().throwStackOverflowError();
+            }
         }
     }
 }

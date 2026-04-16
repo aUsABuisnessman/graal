@@ -264,6 +264,7 @@ import static com.oracle.svm.interpreter.metadata.Bytecodes.SIPUSH;
 import static com.oracle.svm.interpreter.metadata.Bytecodes.SWAP;
 import static com.oracle.svm.interpreter.metadata.Bytecodes.TABLESWITCH;
 import static com.oracle.svm.interpreter.metadata.Bytecodes.WIDE;
+import static com.oracle.svm.interpreter.metadata.CremaTypeAccess.symbolToJvmciKind;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodType;
@@ -284,6 +285,7 @@ import com.oracle.svm.interpreter.debug.SteppingControl;
 import com.oracle.svm.interpreter.metadata.BytecodeStream;
 import com.oracle.svm.interpreter.metadata.Bytecodes;
 import com.oracle.svm.interpreter.metadata.InterpreterConstantPool;
+import com.oracle.svm.interpreter.metadata.InterpreterResolvedInvokeGenericJavaMethod;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaField;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaMethod;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaType;
@@ -381,8 +383,33 @@ public final class Interpreter {
         return execute0(method, frame, forceStayInInterpreter);
     }
 
+    public static Object execute(InterpreterResolvedJavaMethod method, InterpreterFrame frame, int startBCI, int startTOP) {
+        return execute0(method, frame, startBCI, startTOP, false);
+    }
+
+    private static Object execute0(InterpreterResolvedJavaMethod method, InterpreterFrame frame, int startBCI, int startTop, boolean stayInInterpreter) {
+        try {
+            int executeBCI = startBCI;
+            if (startBCI == jdk.vm.ci.code.BytecodeFrame.BEFORE_BCI) {
+                executeBCI = 0;
+                if (method.isSynchronized()) {
+                    Object lockTarget = method.isStatic()
+                                    ? method.getDeclaringClass().getJavaClass()
+                                    : frame.getObjectStatic(0);
+                    assert lockTarget != null;
+                    InterpreterToVM.monitorEnter(frame, nullCheck(lockTarget));
+                }
+            }
+            assert method.getInterpretedCode() != null : "no bytecode stream for " + method;
+            return Root.executeBodyFromBCI(frame, method, executeBCI, startTop, stayInInterpreter);
+        } finally {
+            InterpreterToVM.releaseInterpreterFrameLocks(frame);
+        }
+    }
+
     private static Object execute0(InterpreterResolvedJavaMethod method, InterpreterFrame frame, boolean stayInInterpreter) {
         try {
+            assert method.isStatic() || EspressoFrame.getThis(frame) != null;
             if (method.isSynchronized()) {
                 Object lockTarget = method.isStatic()
                                 ? method.getDeclaringClass().getJavaClass()
@@ -394,6 +421,7 @@ public final class Interpreter {
             if (intrinsic != null) {
                 return IntrinsicRoot.execute(frame, method, intrinsic, stayInInterpreter);
             } else {
+                assert method.getInterpretedCode() != null : "no bytecode stream for " + method;
                 int startTop = startingStackOffset(method.getMaxLocals());
                 return Root.executeBodyFromBCI(frame, method, 0, startTop, stayInInterpreter);
             }
@@ -541,12 +569,14 @@ public final class Interpreter {
                     MethodHandle mh = (MethodHandle) EspressoFrame.getThis(frame);
                     Target_java_lang_invoke_MemberName vmentry = MethodHandleInterpreterUtils.extractVMEntry(mh);
                     InterpreterResolvedJavaMethod target = InterpreterResolvedJavaMethod.fromMemberName(vmentry);
-                    Object[] calleeArgs = frame.getArguments();
+                    InterpreterUnresolvedSignature signature = method.getSignature();
+                    Object[] calleeArgs = rebasic(frame.getArguments(), signature, !method.isStatic());
                     // This should integrate with the debugger GR-70801
                     boolean preferStayInInterpreter = forceStayInInterpreter;
                     traceInvokeBasic(target, indent);
                     try {
-                        yield InterpreterToVM.dispatchInvocation(target, calleeArgs, CallKind.DIRECT, forceStayInInterpreter, preferStayInInterpreter, false);
+                        Object result = InterpreterToVM.dispatchInvocation(target, calleeArgs, CallKind.DIRECT, forceStayInInterpreter, preferStayInInterpreter, false);
+                        yield unbasic(result, signature.getReturnKind());
                     } catch (SemanticJavaException e) {
                         throw uncheckedThrow(e.getCause());
                     }
@@ -595,6 +625,20 @@ public final class Interpreter {
         return res;
     }
 
+    static Object[] rebasic(Object[] arguments, InterpreterUnresolvedSignature srcSig, boolean inclReceiver) {
+        int parameterCount = srcSig.getParameterCount(inclReceiver);
+        Object[] res = new Object[parameterCount];
+        int start = 0;
+        if (inclReceiver) {
+            res[start++] = arguments[0];
+        }
+        for (int i = start; i < parameterCount; i++) {
+            JavaKind kind = srcSig.getParameterKind(i - start);
+            res[i] = rebasic(arguments[i], kind);
+        }
+        return res;
+    }
+
     /**
      * Convert ints to sub-words.
      */
@@ -632,10 +676,6 @@ public final class Interpreter {
             int curBCI = startBCI;
             int top = startTop;
             byte[] code = method.getInterpretedCode();
-
-            assert method.isStatic() || EspressoFrame.getThis(frame) != null;
-
-            InterpreterUtil.guarantee(code != null, "no bytecode stream for %s", method);
 
             int indent = getLogIndent();
             traceInterpreterEnter(method, indent, curBCI, top);
@@ -1214,7 +1254,7 @@ public final class Interpreter {
         // @formatter:on
     }
 
-    private static void clearOperandStack(InterpreterFrame frame, InterpreterResolvedJavaMethod method, int top) {
+    public static void clearOperandStack(InterpreterFrame frame, InterpreterResolvedJavaMethod method, int top) {
         int stackStart = startingStackOffset(method.getMaxLocals());
         for (int slot = top - 1; slot >= stackStart; --slot) {
             clear(frame, slot);
@@ -1222,7 +1262,7 @@ public final class Interpreter {
     }
 
     private static boolean takeBranchRef1(Object operand, int opcode) {
-        assert IFNULL <= opcode && opcode <= IFNONNULL;
+        assert IFNULL <= opcode && opcode <= IFNONNULL : Bytecodes.nameOf(opcode);
         return switch (opcode) {
             case IFNULL -> operand == null;
             case IFNONNULL -> operand != null;
@@ -1231,7 +1271,7 @@ public final class Interpreter {
     }
 
     private static boolean takeBranchPrimitive1(int operand, int opcode) {
-        assert IFEQ <= opcode && opcode <= IFLE;
+        assert IFEQ <= opcode && opcode <= IFLE : Bytecodes.nameOf(opcode);
         return switch (opcode) {
             case IFEQ -> operand == 0;
             case IFNE -> operand != 0;
@@ -1244,7 +1284,7 @@ public final class Interpreter {
     }
 
     private static boolean takeBranchPrimitive2(int operand1, int operand2, int opcode) {
-        assert IF_ICMPEQ <= opcode && opcode <= IF_ICMPLE;
+        assert IF_ICMPEQ <= opcode && opcode <= IF_ICMPLE : Bytecodes.nameOf(opcode);
         return switch (opcode) {
             case IF_ICMPEQ -> operand1 == operand2;
             case IF_ICMPNE -> operand1 != operand2;
@@ -1257,7 +1297,7 @@ public final class Interpreter {
     }
 
     private static boolean takeBranchRef2(Object operand1, Object operand2, int opcode) {
-        assert IF_ACMPEQ <= opcode && opcode <= IF_ACMPNE;
+        assert IF_ACMPEQ <= opcode && opcode <= IF_ACMPNE : Bytecodes.nameOf(opcode);
         return switch (opcode) {
             case IF_ACMPEQ -> operand1 == operand2;
             case IF_ACMPNE -> operand1 != operand2;
@@ -1266,7 +1306,7 @@ public final class Interpreter {
     }
 
     private static void arrayLoad(InterpreterFrame frame, MethodProfile methodProfile, int bci, int top, int loadOpcode) {
-        assert IALOAD <= loadOpcode && loadOpcode <= SALOAD;
+        assert IALOAD <= loadOpcode && loadOpcode <= SALOAD : Bytecodes.nameOf(loadOpcode);
         int index = popInt(frame, top - 1);
         Object array = nullCheck(popObject(frame, top - 2));
         switch (loadOpcode) {
@@ -1287,7 +1327,7 @@ public final class Interpreter {
     }
 
     private static void arrayStore(InterpreterFrame frame, MethodProfile methodProfile, int bci, int top, int storeOpcode) {
-        assert IASTORE <= storeOpcode && storeOpcode <= SASTORE;
+        assert IASTORE <= storeOpcode && storeOpcode <= SASTORE : Bytecodes.nameOf(storeOpcode);
         int offset = (storeOpcode == LASTORE || storeOpcode == DASTORE) ? 2 : 1;
         int index = popInt(frame, top - 1 - offset);
         Object array = nullCheck(popObject(frame, top - 2 - offset));
@@ -1309,7 +1349,7 @@ public final class Interpreter {
     }
 
     @SuppressWarnings("unused")
-    private static int beforeJumpChecks(InterpreterFrame frame, int curBCI, int targetBCI, int top) {
+    public static int beforeJumpChecks(InterpreterFrame frame, int curBCI, int targetBCI, int top) {
         if (targetBCI <= curBCI) {
             // GR-55055: Safepoint poll needed?
             // TODO GR-71799 - add ristretto backedge profiles
@@ -1317,7 +1357,7 @@ public final class Interpreter {
         return targetBCI;
     }
 
-    private static ExceptionHandler resolveExceptionHandler(InterpreterResolvedJavaMethod method, int bci, Throwable ex) {
+    public static ExceptionHandler resolveExceptionHandler(InterpreterResolvedJavaMethod method, int bci, Throwable ex) {
         ExceptionHandler[] handlers = method.getExceptionHandlers();
         ExceptionHandler resolved = null;
         for (ExceptionHandler toCheck : handlers) {
@@ -1393,6 +1433,21 @@ public final class Interpreter {
             }
             case METHODHANDLE -> {
                 putObject(frame, top, resolveMethodHandle(pool, method, opcode, cpi));
+            }
+            case DYNAMIC -> {
+                Object constant = resolveDynamicConstant(pool, method, opcode, cpi);
+                switch (symbolToJvmciKind(pool.dynamicType(cpi))) {
+                    case Boolean -> putInt(frame, top, (Boolean) constant ? 1 : 0);
+                    case Byte -> putInt(frame, top, (Byte) constant);
+                    case Short -> putInt(frame, top, (Short) constant);
+                    case Char -> putInt(frame, top, (Character) constant);
+                    case Int -> putInt(frame, top, (Integer) constant);
+                    case Float -> putFloat(frame, top, (Float) constant);
+                    case Long -> putLong(frame, top, (Long) constant);
+                    case Double -> putDouble(frame, top, (Double) constant);
+                    case Object -> putObject(frame, top, constant);
+                    default -> throw VMError.shouldNotReachHere("Unexpected dynamic constant type " + pool.dynamicType(cpi));
+                }
             }
             case INVOKEDYNAMIC -> {
                 // TODO(peterssen): GR-68576 Storing the pre-resolved appendix in the CP is a
@@ -1512,6 +1567,15 @@ public final class Interpreter {
             } catch (Throwable e) {
                 throw SemanticJavaException.raise(e);
             }
+            if (seedMethod instanceof InterpreterResolvedInvokeGenericJavaMethod invokeGenericJavaMethod) {
+                Object appendix = invokeGenericJavaMethod.getAppendix();
+                if (appendix != null) {
+                    EspressoFrame.putObject(callerFrame, top, appendix);
+                    invokeTop = top + 1;
+                }
+                seedMethod = invokeGenericJavaMethod.getInvoker();
+                callKind = CallKind.DIRECT;
+            }
             if (InterpreterTraceSupport.getValue()) {
                 traceInterpreter().string("Linking for call site of ").string(Bytecodes.nameOf(opcode)).string(" with resolved cp entry ").string(symbolicResolution.toString()).string(":")
                                 .newline();
@@ -1542,7 +1606,7 @@ public final class Interpreter {
     }
 
     private static MethodType resolveMethodType(InterpreterConstantPool pool, InterpreterResolvedJavaMethod method, int opcode, char cpi) {
-        assert opcode == LDC || opcode == LDC_W;
+        assert opcode == LDC || opcode == LDC_W : Bytecodes.nameOf(opcode);
         try {
             return pool.resolvedMethodTypeAt(cpi, method.getDeclaringClass());
         } catch (Throwable t) {
@@ -1551,9 +1615,18 @@ public final class Interpreter {
     }
 
     private static MethodHandle resolveMethodHandle(InterpreterConstantPool pool, InterpreterResolvedJavaMethod method, int opcode, char cpi) {
-        assert opcode == LDC || opcode == LDC_W;
+        assert opcode == LDC || opcode == LDC_W : Bytecodes.nameOf(opcode);
         try {
             return pool.resolvedMethodHandleAt(cpi, method.getDeclaringClass());
+        } catch (Throwable t) {
+            throw SemanticJavaException.raise(t);
+        }
+    }
+
+    private static Object resolveDynamicConstant(InterpreterConstantPool pool, InterpreterResolvedJavaMethod method, int opcode, char cpi) {
+        assert opcode == LDC || opcode == LDC_W : Bytecodes.nameOf(opcode);
+        try {
+            return pool.resolvedDynamicConstantAt(cpi, method.getDeclaringClass());
         } catch (Throwable t) {
             throw SemanticJavaException.raise(t);
         }
@@ -1562,7 +1635,7 @@ public final class Interpreter {
     // region Class/Method/Field resolution
 
     private static InterpreterResolvedJavaType resolveType(InterpreterResolvedJavaMethod method, int opcode, char cpi) {
-        assert opcode == INSTANCEOF || opcode == CHECKCAST || opcode == NEW || opcode == ANEWARRAY || opcode == MULTIANEWARRAY || opcode == LDC || opcode == LDC_W;
+        assert opcode == INSTANCEOF || opcode == CHECKCAST || opcode == NEW || opcode == ANEWARRAY || opcode == MULTIANEWARRAY || opcode == LDC || opcode == LDC_W : Bytecodes.nameOf(opcode);
         if (GraalDirectives.injectBranchProbability(GraalDirectives.SLOWPATH_PROBABILITY, cpi == 0)) {
             throw noClassDefFoundError(opcode, null);
         }
@@ -1581,7 +1654,7 @@ public final class Interpreter {
     }
 
     private static InterpreterResolvedJavaType resolveTypeOrNullIfUnresolvable(InterpreterResolvedJavaMethod method, int opcode, char cpi) {
-        assert opcode == INSTANCEOF || opcode == CHECKCAST || opcode == NEW || opcode == ANEWARRAY || opcode == MULTIANEWARRAY || opcode == LDC || opcode == LDC_W;
+        assert opcode == INSTANCEOF || opcode == CHECKCAST || opcode == NEW || opcode == ANEWARRAY || opcode == MULTIANEWARRAY || opcode == LDC || opcode == LDC_W : Bytecodes.nameOf(opcode);
         if (GraalDirectives.injectBranchProbability(GraalDirectives.SLOWPATH_PROBABILITY, cpi == 0)) {
             return null; // CPI 0 is a marker for unresolvable AND unknown entry
         }
@@ -1625,7 +1698,7 @@ public final class Interpreter {
     }
 
     public static InterpreterResolvedJavaMethod resolveMethod(InterpreterResolvedJavaMethod method, int opcode, char cpi) {
-        assert Bytecodes.isInvoke(opcode);
+        assert Bytecodes.isInvoke(opcode) : Bytecodes.nameOf(opcode);
         if (GraalDirectives.injectBranchProbability(GraalDirectives.SLOWPATH_PROBABILITY, cpi == 0)) {
             throw noSuchMethodError(opcode, null);
         }
@@ -1644,7 +1717,7 @@ public final class Interpreter {
     }
 
     private static InterpreterResolvedJavaField resolveField(InterpreterResolvedJavaMethod method, int opcode, char cpi) {
-        assert opcode == GETFIELD || opcode == GETSTATIC || opcode == PUTFIELD || opcode == PUTSTATIC;
+        assert opcode == GETFIELD || opcode == GETSTATIC || opcode == PUTFIELD || opcode == PUTSTATIC : Bytecodes.nameOf(opcode);
         if (GraalDirectives.injectBranchProbability(GraalDirectives.SLOWPATH_PROBABILITY, cpi == 0)) {
             throw noSuchFieldError(opcode, null);
         }
@@ -1796,7 +1869,7 @@ public final class Interpreter {
      * </pre>
      */
     private static int putField(InterpreterFrame frame, int top, InterpreterResolvedJavaField field, int opcode) {
-        assert opcode == PUTFIELD || opcode == PUTSTATIC;
+        assert opcode == PUTFIELD || opcode == PUTSTATIC : Bytecodes.nameOf(opcode);
         assert field.isStatic() == (opcode == PUTSTATIC);
         assert !field.isUnmaterializedConstant();
         JavaKind kind = field.getJavaKind();
@@ -1841,7 +1914,7 @@ public final class Interpreter {
      * </pre>
      */
     private static int getField(InterpreterFrame frame, int top, InterpreterResolvedJavaField field, int opcode) {
-        assert opcode == GETFIELD || opcode == GETSTATIC;
+        assert opcode == GETFIELD || opcode == GETSTATIC : Bytecodes.nameOf(opcode);
         assert field.isStatic() == (opcode == GETSTATIC);
         JavaKind kind = field.getJavaKind();
         assert kind != JavaKind.Illegal;

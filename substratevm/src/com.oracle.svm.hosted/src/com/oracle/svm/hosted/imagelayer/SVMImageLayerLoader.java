@@ -1555,8 +1555,11 @@ public class SVMImageLayerLoader extends ImageLayerLoader {
                 }
             }
             case PRIMITIVE_DATA -> {
+                assert type.isArray() && type.getComponentType().isPrimitive() : type + " should be an array of primitives.";
                 Object array = CapnProtoAdapters.toArray(baseLayerConstant.getPrimitiveData());
-                addBaseLayerObject(id, objectOffset, () -> new ImageHeapPrimitiveArray(type, null, array, Array.getLength(array), identityHashCode, id));
+                addBaseLayerObject(id, objectOffset,
+                                () -> new ImageHeapPrimitiveArray(type, null, GuestAccess.get().getSnippetReflection().forObject(array),
+                                                Array.getLength(array), identityHashCode, id));
             }
             case RELOCATABLE -> {
                 String key = baseLayerConstant.getRelocatable().getKey().toString();
@@ -1886,16 +1889,16 @@ public class SVMImageLayerLoader extends ImageLayerLoader {
             ScanReason reason = new OtherReason("Manual hub rescan for " + hub.getName() + " triggered from " + SVMImageLayerLoader.class);
             universe.getHeapScanner().rescanObject(hub, reason);
             scanCompanionField(hub);
-            universe.getHeapScanner().rescanField(hub.getCompanion(), universe.lookup(SVMImageLayerSnapshotUtil.CLASS_INITIALIZATION_INFO), reason);
+            universe.getHeapScanner().rescanField(hub.getCompanion(), SVMImageLayerSnapshotUtil.CLASS_INITIALIZATION_INFO, reason);
             if (type.getJavaKind() == JavaKind.Object) {
                 if (type.isArray()) {
                     DynamicHub componentHub = hub.getComponentHub();
                     scanCompanionField(componentHub);
-                    universe.getHeapScanner().rescanField(componentHub.getCompanion(), universe.lookup(SVMImageLayerSnapshotUtil.ARRAY_HUB), reason);
+                    universe.getHeapScanner().rescanField(componentHub.getCompanion(), SVMImageLayerSnapshotUtil.ARRAY_HUB, reason);
                 }
-                universe.getHeapScanner().rescanField(hub.getCompanion(), universe.lookup(SVMImageLayerSnapshotUtil.INTERFACES_ENCODING), reason);
+                universe.getHeapScanner().rescanField(hub.getCompanion(), SVMImageLayerSnapshotUtil.INTERFACES_ENCODING, reason);
                 if (type.isEnum()) {
-                    universe.getHeapScanner().rescanField(hub.getCompanion(), universe.lookup(SVMImageLayerSnapshotUtil.ENUM_CONSTANTS_REFERENCE), reason);
+                    universe.getHeapScanner().rescanField(hub.getCompanion(), SVMImageLayerSnapshotUtil.ENUM_CONSTANTS_REFERENCE, reason);
                 }
             }
         }

@@ -40,6 +40,7 @@
  */
 package com.oracle.truffle.runtime;
 
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -47,6 +48,7 @@ import java.util.function.Supplier;
 
 import org.graalvm.options.OptionDescriptors;
 import org.graalvm.options.OptionValues;
+import org.graalvm.polyglot.Engine;
 import org.graalvm.polyglot.SandboxPolicy;
 
 import com.oracle.truffle.api.Assumption;
@@ -360,6 +362,11 @@ final class OptimizedRuntimeSupport extends RuntimeSupport {
     }
 
     @Override
+    public ByteBuffer persistCache(Object runtimeData, Engine.CancellationCallback callback) {
+        return ((EngineData) runtimeData).persistCache(callback);
+    }
+
+    @Override
     public void onEngineClosed(Object runtimeData) {
         ((EngineData) runtimeData).onEngineClosed();
     }
@@ -419,5 +426,20 @@ final class OptimizedRuntimeSupport extends RuntimeSupport {
         if (target instanceof OptimizedCallTarget optimizedCallTarget) {
             optimizedCallTarget.setInitializedTimestamp(timestamp);
         }
+    }
+
+    @Override
+    public void initializeInterpreterCallStackHeadRoom(Object engineData, long interpreterCallStackHeadRoom) {
+        ((EngineData) engineData).interpreterCallStackHeadRoom = interpreterCallStackHeadRoom;
+    }
+
+    @Override
+    public boolean supportsHeapMemoryLimits() {
+        return true;
+    }
+
+    @Override
+    public long getStackOverflowLimit() {
+        return OptimizedTruffleRuntime.getRuntime().getStackOverflowLimit();
     }
 }

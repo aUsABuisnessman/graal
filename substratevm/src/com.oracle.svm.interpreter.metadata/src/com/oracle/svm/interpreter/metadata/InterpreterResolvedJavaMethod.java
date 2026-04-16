@@ -32,14 +32,13 @@ import static com.oracle.svm.espresso.classfile.Constants.ACC_STATIC;
 import static com.oracle.svm.espresso.classfile.Constants.ACC_SYNTHETIC;
 import static com.oracle.svm.espresso.classfile.Constants.ACC_VARARGS;
 import static com.oracle.svm.espresso.classfile.Constants.JVM_RECOGNIZED_METHOD_MODIFIERS;
-import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 import static com.oracle.svm.interpreter.metadata.Bytecodes.BREAKPOINT;
 import static com.oracle.svm.interpreter.metadata.CremaMethodAccess.toJVMCI;
+import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Executable;
 import java.lang.reflect.Modifier;
-import java.lang.reflect.Type;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
@@ -51,16 +50,20 @@ import org.graalvm.nativeimage.c.function.CFunctionPointer;
 import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.core.BuildPhaseProvider;
-import com.oracle.svm.core.FunctionPointerHolder;
+import com.oracle.svm.core.MethodRefHolder;
 import com.oracle.svm.core.SubstrateMetadata;
+import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.graal.code.PreparedSignature;
 import com.oracle.svm.core.heap.UnknownObjectField;
 import com.oracle.svm.core.hub.RuntimeClassLoading;
 import com.oracle.svm.core.hub.crema.CremaSupport;
 import com.oracle.svm.core.hub.registry.SymbolsSupport;
+import com.oracle.svm.core.interpreter.InterpreterSupport;
 import com.oracle.svm.core.invoke.ResolvedMember;
 import com.oracle.svm.core.invoke.Target_java_lang_invoke_MemberName;
+import com.oracle.svm.core.meta.MethodOffset;
 import com.oracle.svm.core.meta.MethodPointer;
+import com.oracle.svm.core.meta.MethodRef;
 import com.oracle.svm.espresso.classfile.Constants;
 import com.oracle.svm.espresso.classfile.JavaVersion;
 import com.oracle.svm.espresso.classfile.ParserMethod;
@@ -70,11 +73,12 @@ import com.oracle.svm.espresso.classfile.descriptors.Name;
 import com.oracle.svm.espresso.classfile.descriptors.ParserSymbols;
 import com.oracle.svm.espresso.classfile.descriptors.Signature;
 import com.oracle.svm.espresso.classfile.descriptors.Symbol;
+import com.oracle.svm.espresso.classfile.descriptors.Type;
 import com.oracle.svm.espresso.shared.meta.SignaturePolymorphicIntrinsic;
 import com.oracle.svm.espresso.shared.resolver.CallKind;
 import com.oracle.svm.espresso.shared.vtable.PartialMethod;
-import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.interpreter.metadata.serialization.VisibleForSerialization;
+import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.util.AnnotationUtil;
@@ -156,15 +160,15 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
 
     private LocalVariableTable localVariableTable;
 
-    private ReferenceConstant<FunctionPointerHolder> nativeEntryPoint;
+    private ReferenceConstant<MethodRefHolder> nativeEntryPoint;
 
     // Token set by the toggle of method enter/exit events.
     private volatile Object interpreterExecToken;
 
     // TODO move to crema once GR-71517 is resolved
     private volatile ResolvedJavaMethod ristrettoMethod;
-    private static final AtomicReferenceFieldUpdater<InterpreterResolvedJavaMethod, ResolvedJavaMethod> RISTRETTO_METHOD_UPDATER = AtomicReferenceFieldUpdater
-                    .newUpdater(InterpreterResolvedJavaMethod.class, ResolvedJavaMethod.class, "ristrettoMethod");
+    private static final AtomicReferenceFieldUpdater<InterpreterResolvedJavaMethod, ResolvedJavaMethod> RISTRETTO_METHOD_UPDATER = AtomicReferenceFieldUpdater.newUpdater(
+                    InterpreterResolvedJavaMethod.class, ResolvedJavaMethod.class, "ristrettoMethod");
 
     @UnknownObjectField(availability = BuildPhaseProvider.ReadyForCompilation.class) //
     private PreparedSignature preparedSignature;
@@ -210,7 +214,7 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
     private InterpreterResolvedJavaMethod(ResolvedJavaMethod originalMethod, Symbol<Name> name, int maxLocals, int maxStackSize, int flags,
                     InterpreterResolvedObjectType declaringClass, InterpreterUnresolvedSignature signature, PreparedSignature preparedSignature, Symbol<Signature> signatureSymbol,
                     byte[] code, ExceptionHandler[] exceptionHandlers, LineNumberTable lineNumberTable, LocalVariableTable localVariableTable,
-                    ReferenceConstant<FunctionPointerHolder> nativeEntryPoint, int vtableIndex, int gotOffset, int enterStubOffset, int methodId) {
+                    ReferenceConstant<MethodRefHolder> nativeEntryPoint, int vtableIndex, int gotOffset, int enterStubOffset, int methodId) {
         this.name = MetadataUtil.requireNonNull(name);
         this.maxLocals = maxLocals;
         this.maxStackSize = maxStackSize;
@@ -238,14 +242,14 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
     private InterpreterResolvedJavaMethod(Symbol<Name> name, int maxLocals, int maxStackSize, int flags,
                     InterpreterResolvedObjectType declaringClass, InterpreterUnresolvedSignature signature, PreparedSignature preparedSignature, Symbol<Signature> signatureSymbol,
                     byte[] code, ExceptionHandler[] exceptionHandlers, LineNumberTable lineNumberTable, LocalVariableTable localVariableTable,
-                    ReferenceConstant<FunctionPointerHolder> nativeEntryPoint, int vtableIndex, int gotOffset, int enterStubOffset, int methodId) {
+                    ReferenceConstant<MethodRefHolder> nativeEntryPoint, int vtableIndex, int gotOffset, int enterStubOffset, int methodId) {
         this.name = MetadataUtil.requireNonNull(name);
         this.maxLocals = maxLocals;
         this.maxStackSize = maxStackSize;
         this.flags = flags;
         this.declaringClass = MetadataUtil.requireNonNull(declaringClass);
         this.signature = MetadataUtil.requireNonNull(signature);
-        this.preparedSignature = preparedSignature;
+        this.preparedSignature = MetadataUtil.requireNonNull(preparedSignature);
         this.signatureSymbol = MetadataUtil.requireNonNull(signatureSymbol);
         this.interpretedCode = code;
         this.exceptionHandlers = exceptionHandlers;
@@ -261,9 +265,9 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
     }
 
     // Used at run-time for signature-polymorphic instantiation
-    private InterpreterResolvedJavaMethod(Symbol<Name> name, int maxLocals, int flags,
+    protected InterpreterResolvedJavaMethod(Symbol<Name> name, int maxLocals, int flags,
                     InterpreterResolvedObjectType declaringClass, InterpreterUnresolvedSignature signature, Symbol<Signature> signatureSymbol,
-                    int vtableIndex, int gotOffset, int enterStubOffset, int methodId, SignaturePolymorphicIntrinsic intrinsic) {
+                    int vtableIndex, int gotOffset, int enterStubOffset, int methodId, SignaturePolymorphicIntrinsic intrinsic, PreparedSignature preparedSignature) {
         this.name = MetadataUtil.requireNonNull(name);
         this.maxLocals = maxLocals;
         this.maxStackSize = 0;
@@ -283,6 +287,7 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
         this.methodId = methodId;
         this.inlinedBy = null;
         this.intrinsic = MetadataUtil.requireNonNull(intrinsic);
+        this.preparedSignature = MetadataUtil.requireNonNull(preparedSignature);
     }
 
     // Used at run-time for the crema sub-class
@@ -315,15 +320,24 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
         this.methodId = UNKNOWN_METHOD_ID;
         this.inlinedBy = null;
         this.intrinsic = null;
+        this.preparedSignature = InterpreterSupport.singleton().prepareSignature(this.signature, !Modifier.isStatic(flags), declaringClass);
     }
 
     @VisibleForSerialization
     public static InterpreterResolvedJavaMethod createForDeserialization(String name, int maxLocals, int maxStackSize, int flags, InterpreterResolvedObjectType declaringClass,
-                    InterpreterUnresolvedSignature signature, PreparedSignature preparedSignature,
+                    InterpreterUnresolvedSignature signature, PreparedSignature maybePreparedSignature,
                     byte[] code, ExceptionHandler[] exceptionHandlers, LineNumberTable lineNumberTable, LocalVariableTable localVariableTable,
-                    ReferenceConstant<FunctionPointerHolder> nativeEntryPoint, int vtableIndex, int gotOffset, int enterStubOffset, int methodId) {
+                    ReferenceConstant<MethodRefHolder> nativeEntryPoint, int vtableIndex, int gotOffset, int enterStubOffset, int methodId) {
         Symbol<Name> nameSymbol = SymbolsSupport.getNames().getOrCreate(name);
         Symbol<Signature> signatureSymbol = toSymbol(signature);
+        PreparedSignature preparedSignature;
+        if (maybePreparedSignature != null) {
+            preparedSignature = maybePreparedSignature;
+        } else if (InterpreterSupport.isEnabled()) {
+            preparedSignature = InterpreterSupport.singleton().prepareSignature(signature, !Modifier.isStatic(flags), declaringClass);
+        } else {
+            preparedSignature = null;
+        }
         return new InterpreterResolvedJavaMethod(nameSymbol, maxLocals, maxStackSize, flags, declaringClass, signature, preparedSignature, signatureSymbol, code,
                         exceptionHandlers, lineNumberTable, localVariableTable, nativeEntryPoint, vtableIndex, gotOffset, enterStubOffset, methodId);
     }
@@ -334,13 +348,18 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
                     InterpreterResolvedObjectType declaringClass,
                     InterpreterUnresolvedSignature signature, boolean isSubstitutedNative,
                     byte[] code, ExceptionHandler[] exceptionHandlers, LineNumberTable lineNumberTable, LocalVariableTable localVariableTable,
-                    ReferenceConstant<FunctionPointerHolder> nativeEntryPoint, int vtableIndex, int gotOffset, int enterStubOffset, int methodId) {
+                    ReferenceConstant<MethodRefHolder> nativeEntryPoint, int vtableIndex, int gotOffset, int enterStubOffset, int methodId) {
         Symbol<Name> nameSymbol = SymbolsSupport.getNames().getOrCreate(name);
         Symbol<Signature> signatureSymbol = toSymbol(signature);
         int flags = createFlags(modifiers, declaringClass, signatureSymbol, isSubstitutedNative, originalMethod);
         PreparedSignature preparedSignature = null;
         return new InterpreterResolvedJavaMethod(originalMethod, nameSymbol, maxLocals, maxStackSize, flags, declaringClass, signature, preparedSignature, signatureSymbol, code,
                         exceptionHandlers, lineNumberTable, localVariableTable, nativeEntryPoint, vtableIndex, gotOffset, enterStubOffset, methodId);
+    }
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public static MethodRef createMethodRef(ResolvedJavaMethod method) {
+        return SubstrateOptions.useRelativeCodePointers() ? new MethodOffset(method) : new MethodPointer(method);
     }
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
@@ -437,8 +456,9 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
         }
         assert Modifier.isNative(newModifiers);
         InterpreterUnresolvedSignature jvmciSignature = CremaMethodAccess.toJVMCI(newSignature, SymbolsSupport.getTypes());
+        PreparedSignature prepSignature = InterpreterSupport.singleton().prepareSignature(jvmciSignature, !Modifier.isStatic(newModifiers), getDeclaringClass());
         return new InterpreterResolvedJavaMethod(name, jvmciSignature.slotsForParameters(true), newModifiers, declaringClass, jvmciSignature, newSignature,
-                        vtableIndex, gotOffset, enterStubOffset, methodId, iid);
+                        vtableIndex, gotOffset, enterStubOffset, methodId, iid, prepSignature);
     }
 
     private static int getOriginalModifiers(int modifiers, boolean isSubstitutedNative) {
@@ -691,18 +711,18 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
         if (nativeEntryPoint == null) {
             return Word.nullPointer();
         }
-        return nativeEntryPoint.getReferent().functionPointer;
+        return nativeEntryPoint.getReferent().getFunctionPointer();
     }
 
-    public final ReferenceConstant<FunctionPointerHolder> getNativeEntryPointHolderConstant() {
+    public final ReferenceConstant<MethodRefHolder> getNativeEntryPointHolderConstant() {
         return nativeEntryPoint;
     }
 
     @Platforms(Platform.HOSTED_ONLY.class)
-    public final void setNativeEntryPoint(MethodPointer nativeEntryPoint) {
+    public final void setNativeEntryPoint(MethodRef nativeEntryPoint) {
         if (this.nativeEntryPoint != null && nativeEntryPoint != null) {
             /* already set, verify if it's the same */
-            ResolvedJavaMethod setMethod = ((MethodPointer) this.nativeEntryPoint.getReferent().functionPointer).getMethod();
+            ResolvedJavaMethod setMethod = this.nativeEntryPoint.getReferent().getMethod();
             VMError.guarantee(setMethod.equals(nativeEntryPoint.getMethod()));
             return;
         }
@@ -710,7 +730,7 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
         if (nativeEntryPoint == null) {
             this.nativeEntryPoint = null;
         } else {
-            this.nativeEntryPoint = ReferenceConstant.createFromNonNullReference(new FunctionPointerHolder(nativeEntryPoint));
+            this.nativeEntryPoint = ReferenceConstant.createFromNonNullReference(new MethodRefHolder(nativeEntryPoint));
         }
     }
 
@@ -816,10 +836,14 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
         return this;
     }
 
+    @Platforms(Platform.HOSTED_ONLY.class)
     public void setPreparedSignature(PreparedSignature preparedSignature) {
         this.preparedSignature = preparedSignature;
     }
 
+    /**
+     * Returns the precomputed ABI-ready signature consumed by interpreter stubs.
+     */
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public PreparedSignature getPreparedSignature() {
         return preparedSignature;
@@ -834,12 +858,12 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
 
     @Override
     public final boolean shouldSkipLoadingConstraints() {
-        throw VMError.unimplemented("shouldSkipLoadingConstraints");
+        return isSignaturePolymorphicIntrinsic();
     }
 
     @Override
-    public final CodeAttribute getCodeAttribute() {
-        throw VMError.unimplemented("getCodeAttribute");
+    public CodeAttribute getCodeAttribute() {
+        throw VMError.unimplemented("code attribute unavailable for AOT methods.");
     }
 
     @Override
@@ -848,17 +872,27 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
     }
 
     @Override
-    public final void loadingConstraints(InterpreterResolvedJavaType accessingClass, Function<String, RuntimeException> errorHandler) {
-        throw VMError.unimplemented("loadingConstraints");
+    public final void loadingConstraints(InterpreterResolvedJavaType accessingClass) {
+        ClassLoader loader1 = accessingClass.getClassLoader();
+        ClassLoader loader2 = getDeclaringClass().getClassLoader();
+        checkLoadingConstraints(loader1, loader2);
+    }
+
+    public final void checkLoadingConstraints(ClassLoader loader1, ClassLoader loader2) {
+        if (loader1 != loader2) {
+            for (Symbol<Type> type : SymbolsSupport.getSignatures().parsed(getSymbolicSignature())) {
+                CremaSupport.singleton().checkLoadingConstraint(type, loader1, loader2);
+            }
+        }
     }
 
     @Override
-    public final com.oracle.svm.espresso.classfile.ExceptionHandler[] getSymbolicExceptionHandlers() {
-        throw VMError.unimplemented("getSymbolicExceptionHandlers");
+    public com.oracle.svm.espresso.classfile.ExceptionHandler[] getSymbolicExceptionHandlers() {
+        throw VMError.unimplemented("symbolic exception handlers unavailable for AOT methods.");
     }
 
     @Override
-    public final Type[] getGenericParameterTypes() {
+    public final java.lang.reflect.Type[] getGenericParameterTypes() {
         throw VMError.intentionallyUnimplemented();
     }
 

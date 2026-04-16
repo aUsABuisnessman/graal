@@ -28,7 +28,6 @@ import static com.oracle.graal.pointsto.ObjectScanner.OtherReason;
 import static com.oracle.graal.pointsto.ObjectScanner.ScanReason;
 import static com.oracle.svm.interpreter.InterpreterFeature.assertionsEnabled;
 
-import java.lang.reflect.Field;
 import java.util.Arrays;
 import java.util.List;
 
@@ -41,11 +40,10 @@ import org.graalvm.word.Pointer;
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.meta.AnalysisUniverse;
-import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
-import com.oracle.svm.core.hub.ClassForNameSupport;
 import com.oracle.svm.core.hub.RuntimeClassLoading;
 import com.oracle.svm.core.hub.crema.CremaSupport;
+import com.oracle.svm.core.hub.registry.ClassRegistries;
 import com.oracle.svm.core.meta.MethodPointer;
 import com.oracle.svm.hosted.FeatureImpl;
 import com.oracle.svm.hosted.meta.HostedField;
@@ -57,13 +55,16 @@ import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaField;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaMethod;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaType;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedObjectType;
+import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.Disallowed;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.VMError;
+import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.JVMCIReflectionUtil;
-import com.oracle.svm.shared.util.ReflectionUtil;
+
+import jdk.vm.ci.meta.ResolvedJavaField;
 
 /**
  * In this mode the interpreter is used to execute previously (= image build-time) unknown methods,
@@ -74,6 +75,8 @@ import com.oracle.svm.shared.util.ReflectionUtil;
 @AutomaticallyRegisteredFeature
 @SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
 public class CremaFeature implements InternalFeature {
+    private static final String VTABLE_HOLDER_FIELD = "vtableHolder";
+
     private AnalysisMethod enterVTableInterpreterStub;
     private AnalysisMethod enterDirectInterpreterStub;
 
@@ -90,20 +93,21 @@ public class CremaFeature implements InternalFeature {
     @Override
     public void afterRegistration(AfterRegistrationAccess access) {
         ImageSingletons.add(CremaSupport.class, new CremaSupportImpl());
-        VMError.guarantee(!RuntimeClassLoading.isSupported() || ClassForNameSupport.respectClassLoader());
+        VMError.guarantee(!RuntimeClassLoading.isSupported() || ClassRegistries.respectClassLoader());
     }
 
     @Override
     public void beforeAnalysis(BeforeAnalysisAccess access) {
         FeatureImpl.BeforeAnalysisAccessImpl accessImpl = (FeatureImpl.BeforeAnalysisAccessImpl) access;
         try {
-            AnalysisType declaringClass = accessImpl.getMetaAccess().lookupJavaType(InterpreterStubSection.class);
+            var metaAccess = accessImpl.getMetaAccess();
+            AnalysisType declaringClass = metaAccess.lookupJavaType(InterpreterStubSection.class);
 
-            enterVTableInterpreterStub = (AnalysisMethod) JVMCIReflectionUtil.getUniqueDeclaredMethod(accessImpl.getMetaAccess(), declaringClass,
+            enterVTableInterpreterStub = (AnalysisMethod) JVMCIReflectionUtil.getUniqueDeclaredMethod(metaAccess, declaringClass,
                             "enterVTableInterpreterStub", int.class, Pointer.class);
             accessImpl.registerAsRoot(enterVTableInterpreterStub, true, "stub for interpreter");
 
-            enterDirectInterpreterStub = (AnalysisMethod) JVMCIReflectionUtil.getUniqueDeclaredMethod(accessImpl.getMetaAccess(), declaringClass,
+            enterDirectInterpreterStub = (AnalysisMethod) JVMCIReflectionUtil.getUniqueDeclaredMethod(metaAccess, declaringClass,
                             "enterDirectInterpreterStub", InterpreterResolvedJavaMethod.class, Pointer.class);
             accessImpl.registerAsRoot(enterDirectInterpreterStub, true, "stub for interpreter");
         } catch (NoSuchMethodError e) {
@@ -131,7 +135,7 @@ public class CremaFeature implements InternalFeature {
         FeatureImpl.BeforeCompilationAccessImpl accessImpl = (FeatureImpl.BeforeCompilationAccessImpl) access;
         HostedUniverse hUniverse = accessImpl.getUniverse();
         BuildTimeInterpreterUniverse iUniverse = BuildTimeInterpreterUniverse.singleton();
-        Field vtableHolderField = ReflectionUtil.lookupField(InterpreterResolvedObjectType.class, "vtableHolder");
+        ResolvedJavaField vtableHolderField = JVMCIReflectionUtil.getUniqueDeclaredField(GuestAccess.get().lookupType(InterpreterResolvedObjectType.class), VTABLE_HOLDER_FIELD);
 
         for (HostedMethod method : hUniverse.getMethods()) {
             if (method.hasVTableIndex()) {

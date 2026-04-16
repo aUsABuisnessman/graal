@@ -33,6 +33,7 @@ import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.Arrays;
 
+import com.oracle.svm.core.config.ObjectLayout;
 import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.nativeimage.c.function.CodePointer;
 import org.graalvm.word.Pointer;
@@ -46,8 +47,8 @@ import com.oracle.svm.core.code.CodeInfoQueryResult;
 import com.oracle.svm.core.code.CodeInfoTable;
 import com.oracle.svm.core.code.FrameInfoQueryResult;
 import com.oracle.svm.core.code.FrameSourceInfo;
-import com.oracle.svm.core.config.ConfigurationValues;
 import com.oracle.svm.core.deopt.DeoptimizedFrame;
+import com.oracle.svm.core.deopt.VirtualFrame;
 import com.oracle.svm.core.heap.Heap;
 import com.oracle.svm.core.heap.ReferenceAccess;
 import com.oracle.svm.core.heap.VMOperationInfos;
@@ -410,7 +411,7 @@ final class BacktraceVisitor extends JavaStackFrameVisitor {
 
     @Override
     protected boolean visitDeoptimizedFrame(Pointer originalSP, CodePointer deoptStubIP, DeoptimizedFrame deoptimizedFrame) {
-        for (DeoptimizedFrame.VirtualFrame frame = deoptimizedFrame.getTopFrame(); frame != null; frame = frame.getCaller()) {
+        for (VirtualFrame frame = deoptimizedFrame.getTopFrame(); frame != null; frame = frame.getCaller()) {
             FrameInfoQueryResult frameInfo = frame.getFrameInfo();
             if (!dispatchPossiblyInterpretedFrame(frameInfo, originalSP)) {
                 return false;
@@ -573,7 +574,7 @@ final class BacktraceVisitor extends JavaStackFrameVisitor {
      */
     @Fold
     static boolean useCompressedReferences() {
-        return ConfigurationValues.getObjectLayout().getReferenceSize() == 4;
+        return ObjectLayout.singleton().getReferenceSize() == 4;
     }
 
     private static long assertNonZero(long rawValue) {

@@ -37,14 +37,14 @@ import org.graalvm.collections.Pair;
 import com.oracle.graal.pointsto.BigBang;
 import com.oracle.objectfile.ObjectFile;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.config.ConfigurationValues;
+import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.graal.code.SharedCompilationResult;
-import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.hosted.DeadlockWatchdog;
 import com.oracle.svm.hosted.code.HostedDirectCallTrampolineSupport;
 import com.oracle.svm.hosted.code.HostedImageHeapConstantPatch;
 import com.oracle.svm.hosted.code.HostedPatcher;
 import com.oracle.svm.hosted.meta.HostedMethod;
+import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.code.CompilationResult;
 import jdk.graal.compiler.code.CompilationResult.CodeAnnotation;
@@ -70,7 +70,7 @@ public class LIRNativeImageCodeCache extends NativeImageCodeCache {
     @SuppressWarnings("this-escape")
     public LIRNativeImageCodeCache(Map<HostedMethod, CompilationResult> compilations, NativeImageHeap imageHeap) {
         super(compilations, imageHeap);
-        target = ConfigurationValues.getTarget();
+        target = SubstrateTarget.singleton();
         trampolineMap = new HashMap<>();
         orderedTrampolineMap = new HashMap<>();
 
@@ -134,17 +134,20 @@ public class LIRNativeImageCodeCache extends NativeImageCodeCache {
         return true;
     }
 
-    @SuppressWarnings({"try", "resource"})
     @Override
     public void layoutMethods(DebugContext debug, BigBang bb) {
+        layoutMethods(debug, getOrderedCompilations());
+    }
 
+    @SuppressWarnings({"try", "resource"})
+    private void layoutMethods(DebugContext debug, List<Pair<HostedMethod, CompilationResult>> compilations) {
         try (Indent _ = debug.logAndIndent("layout methods")) {
             // Assign initial location to all methods.
             HostedDirectCallTrampolineSupport trampolineSupport = HostedDirectCallTrampolineSupport.singleton();
             Map<HostedMethod, Integer> curOffsetMap = trampolineSupport.mayNeedTrampolines() ? new HashMap<>() : null;
 
             int curPos = 0;
-            for (Pair<HostedMethod, CompilationResult> entry : getOrderedCompilations()) {
+            for (Pair<HostedMethod, CompilationResult> entry : compilations) {
                 HostedMethod method = entry.getLeft();
                 CompilationResult compilation = entry.getRight();
                 curPos = align(curPos, SharedCompilationResult.getCodeAlignment(compilation));
@@ -163,7 +166,7 @@ public class LIRNativeImageCodeCache extends NativeImageCodeCache {
                 addDirectCallTrampolines(curOffsetMap);
 
                 // record final code address offsets and trampoline metadata
-                for (Pair<HostedMethod, CompilationResult> pair : getOrderedCompilations()) {
+                for (Pair<HostedMethod, CompilationResult> pair : compilations) {
                     HostedMethod method = pair.getLeft();
                     int methodStartOffset = curOffsetMap.get(method);
                     method.setCodeAddressOffset(methodStartOffset);
@@ -189,7 +192,7 @@ public class LIRNativeImageCodeCache extends NativeImageCodeCache {
                 }
             }
 
-            Pair<HostedMethod, CompilationResult> lastCompilation = getLastCompilation();
+            Pair<HostedMethod, CompilationResult> lastCompilation = compilations.getLast();
             HostedMethod lastMethod = lastCompilation.getLeft();
 
             // the total code size is aligned up to SubstrateOptions.buildTimeCodeAlignment()

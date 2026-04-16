@@ -24,6 +24,8 @@
  */
 package com.oracle.svm.core.jni.functions;
 
+import java.io.PrintStream;
+
 import org.graalvm.nativeimage.LogHandler;
 import org.graalvm.nativeimage.StackValue;
 import org.graalvm.nativeimage.VMRuntime;
@@ -41,20 +43,19 @@ import org.graalvm.word.impl.Word;
 import com.oracle.svm.core.Isolates;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.UnmanagedMemoryUtil;
-import com.oracle.svm.core.c.CGlobalData;
-import com.oracle.svm.core.c.CGlobalDataFactory;
-import com.oracle.svm.core.c.function.CEntryPointActions;
-import com.oracle.svm.core.c.function.CEntryPointCreateIsolateParameters;
-import com.oracle.svm.core.c.function.CEntryPointErrors;
-import com.oracle.svm.core.c.function.CEntryPointOptions;
-import com.oracle.svm.core.c.function.CEntryPointOptions.NoEpilogue;
-import com.oracle.svm.core.c.function.CEntryPointOptions.NoPrologue;
-import com.oracle.svm.core.c.function.CEntryPointSetup.LeaveDetachThreadEpilogue;
-import com.oracle.svm.core.c.function.CEntryPointSetup.LeaveTearDownIsolateEpilogue;
+import com.oracle.svm.guest.staging.c.function.CEntryPointActions;
+import com.oracle.svm.guest.staging.c.function.CEntryPointCreateIsolateParameters;
+import com.oracle.svm.guest.staging.c.function.CEntryPointErrors;
+import com.oracle.svm.guest.staging.c.function.CEntryPointOptions;
+import com.oracle.svm.guest.staging.c.function.CEntryPointOptions.NoEpilogue;
+import com.oracle.svm.guest.staging.c.function.CEntryPointOptions.NoPrologue;
+import com.oracle.svm.guest.staging.c.function.CEntryPointSetup.LeaveDetachThreadEpilogue;
+import com.oracle.svm.guest.staging.c.function.CEntryPointSetup.LeaveTearDownIsolateEpilogue;
 import com.oracle.svm.core.headers.LibC;
 import com.oracle.svm.core.jdk.RuntimeSupport;
 import com.oracle.svm.core.jni.JNIJavaVMList;
 import com.oracle.svm.core.jni.JNIObjectHandles;
+import com.oracle.svm.guest.staging.SubstrateGuestOptions;
 import com.oracle.svm.core.jni.JNIThreadLocalEnvironment;
 import com.oracle.svm.core.jni.JNIThreadOwnedMonitors;
 import com.oracle.svm.core.jni.functions.JNIFunctions.Support.JNIJavaVMEnterAttachThreadEnsureJavaThreadPrologue;
@@ -72,6 +73,7 @@ import com.oracle.svm.core.jvmti.JvmtiEnvs;
 import com.oracle.svm.core.jvmti.headers.JvmtiExternalEnv;
 import com.oracle.svm.core.jvmti.headers.JvmtiVersion;
 import com.oracle.svm.core.log.FunctionPointerLogHandler;
+import com.oracle.svm.core.log.Log;
 import com.oracle.svm.core.memory.UntrackedNullableNativeMemory;
 import com.oracle.svm.core.monitor.MonitorInflationCause;
 import com.oracle.svm.core.monitor.MonitorSupport;
@@ -79,6 +81,8 @@ import com.oracle.svm.core.snippets.ImplicitExceptions;
 import com.oracle.svm.core.stack.JavaFrameAnchors;
 import com.oracle.svm.core.thread.PlatformThreads;
 import com.oracle.svm.shared.Uninterruptible;
+import com.oracle.svm.guest.staging.c.CGlobalData;
+import com.oracle.svm.guest.staging.c.CGlobalDataFactory;
 import com.oracle.svm.shared.util.Utf8;
 
 /**
@@ -389,13 +393,20 @@ public final class JNIInvocationInterface {
             if (hasSpecialVmOptions) {
                 javaVmIdPointer = parseVMOptions(vmArgs);
             }
-            if (SubstrateOptions.InitializeVM.getValue()) {
+            if (SubstrateGuestOptions.InitializeVM.getValue()) {
                 /*
                  * `JNI_CreateJavaVM` reaches this point only after all JNI VM options have been
                  * applied, so startup hooks can safely observe the final launcher configuration
                  * before any libjvm-backed Crema main dispatch begins.
                  */
-                VMRuntime.initialize();
+                try {
+                    VMRuntime.initialize();
+                } catch (Exception | Error e) {
+                    PrintStream log = Log.logStream();
+                    log.println("Error occurred during initialization of boot layer");
+                    e.printStackTrace(log);
+                    return JNIErrors.JNI_ERR();
+                }
             }
 
             JNIJavaVM javaVm = JNIFunctionTables.singleton().getGlobalJavaVM();

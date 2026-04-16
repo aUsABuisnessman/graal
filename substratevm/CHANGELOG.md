@@ -3,6 +3,7 @@
 This changelog summarizes major changes to GraalVM Native Image.
 
 ## GraalVM 25.1 (Internal Version 25.1.0)
+* (GR-73875) Added `--print-options` flag to `native-image` for printing available build options in table, markdown, or JSON format. Automated generation of option documentation from `@Option` annotations, eliminating manual maintenance of option tables.
 * (GR-70601) (GR-70592) (GR-70593) (GR-70598) (GR-71096): Add experimental support for just-in-time compilation of Java bytecodes loaded at run-time.
 * (GR-73556) Remove the deprecated `@AutomaticFeature` annotation and its handling. Features should be registered via the --features argument.
 * (GR-44384) Add size warnings for bundles when individual or cumulative file sizes exceed limits. Configure with options `size-warning-file-limit` and `size-warning-total-limit` to `bundle-create`, sizes in MiB.
@@ -23,11 +24,14 @@ This changelog summarizes major changes to GraalVM Native Image.
 * (GR-71607) Deprecated and deleted the FallbackFeature. The flag `--no-fallback` is deprecated and has no effect any longer, other related options are removed.
 * (GR-71698) Introduced `--future-defaults=class-for-name-respects-class-loader` that changes 'Class.forName' and 'ClassLoader#loadClass' to respect the class loader arguments. 
 * (GR-72689) The context class loader seen during build-time context initialization is now part of the native image module layer. This means that by default, service loaders will now see some extra service providers definition coming from the native image module path.
+* (GR-74050) JFR now uses the safepoint-based execution sampler by default on all platforms. To use the signal-handler-based execution sampler instead, enable `-H:+SignalHandlerBasedExecutionSampler`.
 * (GR-63737) Deprecated API function `Threading.registerRecurringCallback(...)` without replacement. This method should not be used as it is inherently unsafe.
 * (GR-63737) Removed deprecated API function `ProcessPropertiesSupport.setLocale(...)`.
 * (GR-52538) (GR-69523) (GR-73129) Introduce new SerialGC policy `Adaptive2` and default to mark-compact collection in the old generation. On average, this reduces memory usage and often improves throughput and latency. Restore the old behavior with: `-H:-CompactingOldGen -H:InitialCollectionPolicy=Adaptive`.
 * (GR-71974) Introduced `-H:+CompatibilityMode` that disables all Native Image features that allow users to diverge from original program semantics: build-time initialization for classpath classes, native-image-specific system properties, substitutions on the classpath, and user features, while enabling all future defaults. This mode does not modify key Native Image restrictions related to dynamic access (reachability metadata) and run-time class loading as those are accepted limitations of native image.
 * (GR-74008) On macOS, the build process now uses `memory_pressure` for a more accurate detection of free memory.
+* (GR-73792) Added randomized runtime code entry points. Enable with `-H:+MaxRuntimeCodeOffset`.
+* (GR-73792) Added AMD64 memory masking and fencing mitigation for untrusted code. Enable with `-H:+MemoryMaskingAndFencing`.
 
 ## GraalVM 25
 * (GR-52276) (GR-61959) Add support for Arena.ofShared().

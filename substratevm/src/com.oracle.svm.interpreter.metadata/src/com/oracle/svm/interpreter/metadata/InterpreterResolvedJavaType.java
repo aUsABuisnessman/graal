@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2023, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -34,16 +34,13 @@ import org.graalvm.nativeimage.Platforms;
 import org.graalvm.word.WordBase;
 
 import com.oracle.svm.core.SubstrateMetadata;
-import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.core.hub.DynamicHub;
-import com.oracle.svm.core.hub.RuntimeClassLoading;
-import com.oracle.svm.core.hub.crema.CremaResolvedJavaRecordComponent;
 import com.oracle.svm.core.hub.registry.SymbolsSupport;
-import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.espresso.classfile.descriptors.Name;
 import com.oracle.svm.espresso.classfile.descriptors.Symbol;
 import com.oracle.svm.espresso.classfile.descriptors.Type;
 import com.oracle.svm.espresso.classfile.descriptors.TypeSymbols;
+import com.oracle.svm.shared.util.VMError;
 
 import jdk.vm.ci.meta.Assumptions;
 import jdk.vm.ci.meta.JavaConstant;
@@ -123,6 +120,10 @@ public abstract class InterpreterResolvedJavaType extends InterpreterAnnotated i
     // This is only here for performance, otherwise the clazzConstant must be unwrapped every time.
     public final Class<?> getJavaClass() {
         return MetadataUtil.requireNonNull(clazz);
+    }
+
+    public final DynamicHub getHub() {
+        return DynamicHub.fromClass(getJavaClass());
     }
 
     public final boolean isWordType() {
@@ -212,7 +213,7 @@ public abstract class InterpreterResolvedJavaType extends InterpreterAnnotated i
     }
 
     public final ClassLoader getClassLoader() {
-        return SubstrateUtil.cast(getJavaClass(), DynamicHub.class).getClassLoader();
+        return getHub().getClassLoader();
     }
 
     @Override
@@ -256,11 +257,6 @@ public abstract class InterpreterResolvedJavaType extends InterpreterAnnotated i
     }
 
     @Override
-    public List<? extends CremaResolvedJavaRecordComponent> getRecordComponents() {
-        throw VMError.intentionallyUnimplemented();
-    }
-
-    @Override
     public final boolean isInitialized() {
         return DynamicHub.fromClass(clazz).isInitialized();
     }
@@ -272,12 +268,15 @@ public abstract class InterpreterResolvedJavaType extends InterpreterAnnotated i
 
     @Override
     public final boolean isLinked() {
-        return DynamicHub.fromClass(clazz).isLinked();
+        return DynamicHub.fromClass(clazz).getClassInitializationInfo().isLinked();
     }
 
     @Override
     public void link() {
-        RuntimeClassLoading.ensureLinked(DynamicHub.fromClass(clazz));
+        if (!DynamicHub.fromClass(clazz).isLinked()) {
+            VMError.guarantee(!DynamicHub.fromClass(clazz).isRuntimeLoaded(), "Should have gone to the Crema resolved type implementation.");
+            throw new LinkageError(MetadataUtil.fmt("Cannot link an AOT type at runtime: %s", this));
+        }
     }
 
     @Override
@@ -371,7 +370,7 @@ public abstract class InterpreterResolvedJavaType extends InterpreterAnnotated i
     }
 
     @Override
-    public ResolvedJavaMethod[] getDeclaredConstructors() {
+    public InterpreterResolvedJavaMethod[] getDeclaredConstructors() {
         throw VMError.intentionallyUnimplemented();
     }
 

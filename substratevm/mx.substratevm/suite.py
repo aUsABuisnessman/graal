@@ -476,7 +476,7 @@ suite = {
             "subDir": "src",
             "sourceDirs": ["src"],
             "dependencies": [
-                "com.oracle.svm.core",
+                "com.oracle.svm.core.genscavenge",
             ],
             "requiresConcealed" : {
                 "jdk.internal.vm.ci" : [
@@ -839,6 +839,7 @@ suite = {
                     "jdk.internal.foreign.layout",
                     "jdk.internal.loader",
                     "jdk.internal.reflect",
+                    "jdk.internal.vm.annotation",
                 ],
                 "jdk.internal.vm.ci" : [
                     "jdk.vm.ci.aarch64",
@@ -1400,6 +1401,7 @@ suite = {
             "checkstyle": "com.oracle.svm.core",
             "javaCompliance" : "21+",
             "annotationProcessors": [
+                "compiler:GRAAL_PROCESSOR",
                 "SVM_PROCESSOR",
             ],
             "workingSets": "SVM",
@@ -1494,6 +1496,7 @@ suite = {
                 ],
                 "jdk.internal.vm.ci": [
                     "jdk.vm.ci.aarch64",
+                    "jdk.vm.ci.amd64",
                     "jdk.vm.ci.meta",
                     "jdk.vm.ci.meta.annotation",
                     "jdk.vm.ci.code",
@@ -1931,6 +1934,7 @@ suite = {
                 "opens" : [
                     "com.oracle.svm.core                          to jdk.graal.compiler",
                     "com.oracle.svm.core.nodes                    to jdk.graal.compiler",
+                    "com.oracle.svm.core.graal.amd64              to jdk.graal.compiler",
                     "com.oracle.svm.core.graal.nodes              to jdk.graal.compiler",
                     "com.oracle.svm.core.graal.snippets           to jdk.graal.compiler",
                     "com.oracle.svm.hosted.fieldfolding           to jdk.graal.compiler",
@@ -2066,13 +2070,19 @@ suite = {
                 "name" : "org.graalvm.nativeimage.guest.staging",
                 "exports" : [
                     """* to org.graalvm.nativeimage.builder,
+                            org.graalvm.extraimage.builder,
                             org.graalvm.nativeimage.guest,
                             org.graalvm.nativeimage.foreign,
-                            org.graalvm.truffle.runtime.svm""",
+                            org.graalvm.truffle.runtime.svm,
+                            org.graalvm.nativeimage.agent.jvmtibase,
+                            org.graalvm.nativeimage.enterprise.testrunner,
+                            com.oracle.truffle.enterprise.svm,
+                            com.oracle.svm.svm_enterprise""",
                 ],
                 "opens" : [],
                 "requires": [
                     "transitive org.graalvm.nativeimage",
+                    "jdk.graal.compiler.options",
                 ],
                 "uses" : [
                     "org.graalvm.nativeimage.Platform",
@@ -2262,6 +2272,7 @@ suite = {
                 "SVM",
                 "OBJECTFILE",
                 "POINTSTO",
+                "sdk:NATIVEBRIDGE",
                 "truffle:TRUFFLE_RUNTIME",
             ],
             "moduleInfo" : {
@@ -2751,6 +2762,7 @@ suite = {
                 "builder/clibraries/" : ["extracted-dependency:substratevm:SVM_HOSTED_NATIVE"],
                 "builder/lib/" : ["dependency:com.oracle.svm.native.reporterchelper"],
                 "schemas/reachability-metadata-schema.json" : ["file:schemas/reachability-metadata-schema-v1.2.0.json"],
+                "skills/" : ["file:skills/*"],
                 # Note: `ld64.lld` is a symlink to `lld`, but it is dereferenced here.
                 "bin/" : ["extracted-dependency:LLVM_LLD_STANDALONE/bin/ld64.lld"],
             },
@@ -2840,7 +2852,8 @@ suite = {
                     "org.graalvm.collections",
                 ],
                 "exports" : [
-                    "* to org.graalvm.nativeimage.builder"
+                    "* to org.graalvm.nativeimage.builder",
+                    "com.oracle.svm.hosted.foreign to jdk.graal.compiler"
                 ],
                 "requiresConcealed": {
                     "jdk.internal.vm.ci" : [
@@ -2930,6 +2943,15 @@ suite = {
             ],
             "moduleInfo" : {
                 "name" : "com.oracle.svm.jdwp.server",
+            },
+            "maven" : False,
+        },
+
+        "TRUFFLE_LANGUAGE_LIBRARY_COMMUNITY_GRAALVM_SUPPORT" : {
+            "native" : True,
+            "description" : "Community Truffle language library support distribution for the GraalVM",
+            "layout" : {
+                "native-image.properties" : "file:mx.substratevm/macro-truffle-language-library.properties",
             },
             "maven" : False,
         },

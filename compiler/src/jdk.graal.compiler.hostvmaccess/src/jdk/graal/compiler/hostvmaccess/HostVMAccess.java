@@ -270,11 +270,68 @@ final class HostVMAccess implements VMAccess {
     public JavaConstant asArrayConstant(ResolvedJavaType componentType, JavaConstant... elements) {
         SnippetReflectionProvider snippetReflection = providers.getSnippetReflection();
         Class<?> componentClass = snippetReflection.originalClass(componentType);
+        if (componentClass == null) {
+            throw new IllegalArgumentException("Could not obtain the original class for " + componentType);
+        }
         Object array = Array.newInstance(componentClass, elements.length);
         for (int i = 0; i < elements.length; i++) {
             doWriteArrayElement(array, componentType, i, elements[i]);
         }
         return snippetReflection.forObject(array);
+    }
+
+    /**
+     * Host mode materializes the primitive array with reflection and then wraps it as a
+     * {@link JavaConstant} through {@link SnippetReflectionProvider#forObject(Object)}.
+     */
+    @Override
+    public JavaConstant createPrimitiveArray(JavaKind kind, int length) {
+        if (kind == null || !kind.isPrimitive() || kind == JavaKind.Void) {
+            throw new IllegalArgumentException("Expected a non-void primitive kind, got " + kind);
+        }
+        Object array = Array.newInstance(kind.toJavaClass(), length);
+        return providers.getSnippetReflection().forObject(array);
+    }
+
+    @Override
+    public JavaConstant clonePrimitiveArray(JavaConstant primitiveArray) {
+        ResolvedJavaType arrayType = getProviders().getMetaAccess().lookupJavaType(primitiveArray);
+        if (arrayType == null || !arrayType.isArray() || !arrayType.getComponentType().isPrimitive()) {
+            throw new IllegalArgumentException("Expected a primitive array constant, got " + primitiveArray);
+        }
+        Object source = providers.getSnippetReflection().asObject(Object.class, primitiveArray);
+        if (source == null) {
+            throw new IllegalArgumentException("Could not unwrap a primitive array constant: " + primitiveArray);
+        }
+        /*
+         * Keep cloning explicit by primitive array kind. This avoids reflective clone access and
+         * preserves exact array runtime type through each typed clone() call.
+         */
+        Object copy = switch (source) {
+            case boolean[] array -> array.clone();
+            case byte[] array -> array.clone();
+            case short[] array -> array.clone();
+            case char[] array -> array.clone();
+            case int[] array -> array.clone();
+            case long[] array -> array.clone();
+            case float[] array -> array.clone();
+            case double[] array -> array.clone();
+            default -> throw new IllegalArgumentException("Expected a primitive array constant, got " + primitiveArray);
+        };
+        return providers.getSnippetReflection().forObject(copy);
+    }
+
+    @Override
+    public void copyArray(JavaConstant src, int srcPos, JavaConstant dest, int destPos, int length) {
+        Object srcArray = providers.getSnippetReflection().asObject(Object.class, src);
+        if (srcArray == null || !srcArray.getClass().isArray()) {
+            throw new IllegalArgumentException("Expected an array constant for src, got " + src);
+        }
+        Object destArray = providers.getSnippetReflection().asObject(Object.class, dest);
+        if (destArray == null || !destArray.getClass().isArray()) {
+            throw new IllegalArgumentException("Expected an array constant for dest, got " + dest);
+        }
+        System.arraycopy(srcArray, srcPos, destArray, destPos, length);
     }
 
     private void doWriteArrayElement(Object array, ResolvedJavaType componentType, int index, JavaConstant element) {
@@ -432,6 +489,48 @@ final class HostVMAccess implements VMAccess {
         }
         var unsafe = Unsafe.getUnsafe();
         unsafe.copyMemory(array, unsafe.arrayBaseOffset(array.getClass()) + srcFrom, dst, Unsafe.ARRAY_BYTE_BASE_OFFSET + dstFrom, bytesToCopy);
+    }
+
+    /**
+     * Host mode performs the unaligned read with {@link Unsafe} against the unwrapped hosted array
+     * object.
+     */
+    @Override
+    public JavaConstant readPrimitiveArrayUnaligned(JavaConstant primitiveArray, JavaKind kind, int offset) {
+        if (kind == null || !kind.isPrimitive() || kind == JavaKind.Void) {
+            throw new IllegalArgumentException("Expected a non-void primitive kind, got " + kind);
+        }
+        ResolvedJavaType arrayType = getProviders().getMetaAccess().lookupJavaType(primitiveArray);
+        if (arrayType == null || !arrayType.isArray() || !arrayType.getComponentType().isPrimitive()) {
+            throw new IllegalArgumentException("Expected a primitive array constant, got " + primitiveArray);
+        }
+        Object array = providers.getSnippetReflection().asObject(Object.class, primitiveArray);
+        if (array == null) {
+            throw new IllegalArgumentException("Could not unwrap an array constant: " + primitiveArray);
+        }
+
+        int bytesToRead = kind.getByteCount();
+        long sourceArrayEnd = (long) Array.getLength(array) * arrayType.getComponentType().getJavaKind().getByteCount();
+        if (offset < 0 || (long) offset + bytesToRead > sourceArrayEnd) {
+            throw new IllegalArgumentException(
+                            "Invalid input range: " + offset + ".." + (offset + bytesToRead) + " for array of length " + Array.getLength(array) + " with kind " +
+                                            arrayType.getComponentType().getJavaKind());
+        }
+
+        Unsafe unsafe = Unsafe.getUnsafe();
+        long baseOffset = unsafe.arrayBaseOffset(array.getClass());
+        long absoluteOffset = baseOffset + offset;
+        return switch (kind) {
+            case Boolean -> JavaConstant.forBoolean(unsafe.getByte(array, absoluteOffset) != 0);
+            case Byte -> JavaConstant.forByte(unsafe.getByte(array, absoluteOffset));
+            case Short -> JavaConstant.forShort(unsafe.getShort(array, absoluteOffset));
+            case Char -> JavaConstant.forChar(unsafe.getChar(array, absoluteOffset));
+            case Int -> JavaConstant.forInt(unsafe.getInt(array, absoluteOffset));
+            case Long -> JavaConstant.forLong(unsafe.getLong(array, absoluteOffset));
+            case Float -> JavaConstant.forFloat(unsafe.getFloat(array, absoluteOffset));
+            case Double -> JavaConstant.forDouble(unsafe.getDouble(array, absoluteOffset));
+            default -> throw new IllegalArgumentException("Unsupported kind: " + kind);
+        };
     }
 
     @Override

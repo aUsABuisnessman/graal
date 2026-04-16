@@ -93,12 +93,14 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.nio.ByteBuffer;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.logging.Level;
 
 import org.graalvm.collections.Pair;
 import org.graalvm.options.OptionValues;
+import org.graalvm.polyglot.Engine;
 import org.graalvm.polyglot.SandboxPolicy;
 
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
@@ -213,21 +215,6 @@ public final class EngineData {
         return this.closed;
     }
 
-    public static IllegalArgumentException sandboxPolicyException(SandboxPolicy sandboxPolicy, String reason, String fix) {
-        Objects.requireNonNull(sandboxPolicy);
-        Objects.requireNonNull(reason);
-        Objects.requireNonNull(fix);
-        String spawnIsolateHelp;
-        if (sandboxPolicy.isStricterOrEqual(SandboxPolicy.ISOLATED)) {
-            spawnIsolateHelp = " If you switch to a less strict sandbox policy you can still spawn an isolate with an isolated heap using Builder.option(\"engine.SpawnIsolate\",\"true\").";
-        } else {
-            spawnIsolateHelp = "";
-        }
-        String message = String.format("The validation for the given sandbox policy %s failed. %s " +
-                        "In order to resolve this %s or switch to a less strict sandbox policy using Builder.sandbox(SandboxPolicy).%s", sandboxPolicy, reason, fix, spawnIsolateHelp);
-        return new IllegalArgumentException(message);
-    }
-
     public void preinitializeContext() {
         OptimizedRuntimeAccessor.ENGINE.preinitializeContext(this.polyglotEngine);
     }
@@ -314,6 +301,10 @@ public final class EngineData {
 
     public boolean onStoreCache(Path targetPath, long cancelledWord) {
         return getRuntime().getEngineCacheSupport().onStoreCache(this, targetPath, cancelledWord);
+    }
+
+    public ByteBuffer persistCache(Engine.CancellationCallback callback) {
+        return getRuntime().getEngineCacheSupport().persistCache(this, callback);
     }
 
     private void loadOptions(OptionValues options, SandboxPolicy sandboxPolicy) {
@@ -480,7 +471,8 @@ public final class EngineData {
     private void validateOptions(SandboxPolicy sandboxPolicy) {
         if (sandboxPolicy.isStricterOrEqual(SandboxPolicy.CONSTRAINED) && compilationFailureAction != ExceptionAction.Silent && compilationFailureAction != ExceptionAction.Print) {
             throw OptimizedRuntimeAccessor.ENGINE.createPolyglotEngineException(
-                            sandboxPolicyException(sandboxPolicy, "The engine.CompilationFailureAction option is set to " + compilationFailureAction.name() + ", but must be set to Silent or Print.",
+                            OptimizedRuntimeAccessor.ENGINE.sandboxPolicyException(sandboxPolicy,
+                                            "The engine.CompilationFailureAction option is set to " + compilationFailureAction.name() + ", but must be set to Silent or Print.",
                                             "use the default value (Silent) by removing Builder.option(\"engine.CompilationFailureAction\", ...) or set it to Print"));
         }
         if (compilationFailureAction == ExceptionAction.Throw && backgroundCompilation) {

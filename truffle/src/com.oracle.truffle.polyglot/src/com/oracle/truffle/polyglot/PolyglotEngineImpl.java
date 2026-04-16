@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -542,7 +542,15 @@ final class PolyglotEngineImpl implements com.oracle.truffle.polyglot.PolyglotIm
 
     void notifyCreated() {
         RUNTIME.onEngineCreate(this, this.runtimeData);
-        impl.getRootImpl().onEngineCreated(this);
+        long interpreterCallStackHeadRoom = engineOptionValues.get(PolyglotEngineOptions.InterpreterCallStackHeadRoom);
+        if (interpreterCallStackHeadRoom != 0 && runtimeData != null) {
+            if (EngineAccessor.SANDBOX.isInterpreterCallStackHeadRoomSupported()) {
+                EngineAccessor.RUNTIME.initializeInterpreterCallStackHeadRoom(runtimeData, interpreterCallStackHeadRoom);
+            } else {
+                throw PolyglotEngineException.illegalArgument("The engine.InterpreterCallStackHeadRoom option is set to a non-zero value, but the option is not supported on the current VM. " +
+                                "In order to resolve this either switch to a VM that supports the option or don't set it.");
+            }
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -1286,19 +1294,33 @@ final class PolyglotEngineImpl implements com.oracle.truffle.polyglot.PolyglotIm
         }
 
         synchronized (this.lock) {
-            if (closingThread != null || closed) {
-                throw new IllegalStateException("The engine is already closed and cannot be cancelled or persisted.");
-            }
-            if (!storeEngine) {
-                throw new IllegalStateException(
-                                "In order to store the cache the option 'engine.CacheStoreEnabled' must be set to 'true'.");
-            }
-            List<PolyglotContextImpl> localContexts = collectAliveContexts();
-            if (!localContexts.isEmpty()) {
-                throw new IllegalStateException("There are still alive contexts that need to be closed or cancelled before the engine can be persisted.");
-            }
-
+            validateStoreCacheState();
             return RUNTIME.onStoreCache(this.runtimeData, targetPath, cancelledWord);
+        }
+    }
+
+    ByteBuffer persistCache(Engine.CancellationCallback callback) {
+        if (!TruffleOptions.AOT) {
+            throw new UnsupportedOperationException("Persisting the engine cache is only supported on native-image hosts.");
+        }
+
+        synchronized (this.lock) {
+            validateStoreCacheState();
+            return RUNTIME.persistCache(this.runtimeData, callback);
+        }
+    }
+
+    private void validateStoreCacheState() {
+        if (closingThread != null || closed) {
+            throw new IllegalStateException("The engine is already closed and cannot be cancelled or persisted.");
+        }
+        if (!storeEngine) {
+            throw new IllegalStateException(
+                            "In order to store the cache the option 'engine.CacheStoreEnabled' must be set to 'true'.");
+        }
+        List<PolyglotContextImpl> localContexts = collectAliveContexts();
+        if (!localContexts.isEmpty()) {
+            throw new IllegalStateException("There are still alive contexts that need to be closed or cancelled before the engine can be persisted.");
         }
     }
 
@@ -1957,7 +1979,7 @@ final class PolyglotEngineImpl implements com.oracle.truffle.polyglot.PolyglotIm
                 if (!ALLOW_CREATE_PROCESS) {
                     throw PolyglotEngineException.illegalArgument("Cannot allowCreateProcess() because the privilege is removed at image build time");
                 }
-                useProcessHandler = processHandler != null ? processHandler : getImpl().newDefaultProcessHandler();
+                useProcessHandler = processHandler != null ? processHandler : newDefaultProcessHandler();
             } else {
                 useProcessHandler = null;
             }
@@ -2061,6 +2083,14 @@ final class PolyglotEngineImpl implements com.oracle.truffle.polyglot.PolyglotIm
             getAPIAccess().processReferenceQueue();
         }
         return contextAPI;
+    }
+
+    static ProcessHandler newDefaultProcessHandler() {
+        if (PolyglotEngineImpl.ALLOW_CREATE_PROCESS) {
+            return ProcessHandlers.newDefaultProcessHandler();
+        } else {
+            return null;
+        }
     }
 
     private Context loadPreinitializedContext(PolyglotContextConfig config, Engine engineAPI, boolean registerInActiveContexts) {
@@ -2570,9 +2600,9 @@ final class PolyglotEngineImpl implements com.oracle.truffle.polyglot.PolyglotIm
 
     @SuppressWarnings("try")
     void validateVirtualThreadCreation() {
+        var options = getEngineOptionValues();
         if (!warnedVirtualThreadSupport.get() && warnedVirtualThreadSupport.compareAndSet(false, true)) {
-            try (AbstractPolyglotImpl.ThreadScope scope = impl.getRootImpl().createThreadScope()) {
-                var options = getEngineOptionValues();
+            try (AbstractPolyglotImpl.ThreadScope scope = impl.createThreadScope()) {
                 boolean warnVirtualThreadSupport = options.get(PolyglotEngineOptions.WarnVirtualThreadSupport);
 
                 if (warnVirtualThreadSupport && !(Truffle.getRuntime() instanceof DefaultTruffleRuntime)) {
@@ -2596,8 +2626,9 @@ final class PolyglotEngineImpl implements com.oracle.truffle.polyglot.PolyglotIm
                 }
             }
         }
-
-        impl.getRootImpl().validateVirtualThreadCreation(getEngineOptionValues());
+        if (options.get(PolyglotEngineOptions.SpawnIsolate) != null) {
+            throw PolyglotEngineException.illegalState("Using isolated polyglot contexts together with Java virtual threads is currently not supported.");
+        }
     }
 
     /**

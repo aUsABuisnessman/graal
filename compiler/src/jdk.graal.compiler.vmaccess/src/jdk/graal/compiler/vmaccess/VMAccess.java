@@ -33,6 +33,7 @@ import java.util.stream.Stream;
 import jdk.graal.compiler.phases.util.Providers;
 import jdk.vm.ci.meta.Constant;
 import jdk.vm.ci.meta.JavaConstant;
+import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
@@ -146,6 +147,43 @@ public interface VMAccess {
      *             {@code componentType}
      */
     JavaConstant asArrayConstant(ResolvedJavaType componentType, JavaConstant... elements);
+
+    /**
+     * Creates a new primitive array of {@code kind} and {@code length}.
+     *
+     * @param kind primitive element kind for the array
+     * @param length array length
+     * @return the created primitive array as a {@link JavaConstant}
+     * @throws IllegalArgumentException if {@code kind} is not a non-void primitive kind
+     * @throws NegativeArraySizeException if {@code length} is negative
+     */
+    JavaConstant createPrimitiveArray(JavaKind kind, int length);
+
+    /**
+     * Clones a primitive array.
+     *
+     * @param primitiveArray a {@link JavaConstant} representing a primitive array
+     * @return a cloned primitive array as a {@link JavaConstant}
+     * @throws IllegalArgumentException if {@code primitiveArray} does not represent a primitive
+     *             array
+     */
+    JavaConstant clonePrimitiveArray(JavaConstant primitiveArray);
+
+    /**
+     * Copies array elements using {@link System#arraycopy(Object, int, Object, int, int)}
+     * semantics.
+     *
+     * @param src source array constant
+     * @param srcPos source start index
+     * @param dest destination array constant
+     * @param destPos destination start index
+     * @param length number of elements to copy
+     * @throws IllegalArgumentException if either array constant cannot be unwrapped to an array
+     * @throws ArrayStoreException if an element in {@code src} cannot be stored into {@code dest}
+     * @throws IndexOutOfBoundsException if any index or range argument violates
+     *             {@link System#arraycopy(Object, int, Object, int, int)} bounds constraints
+     */
+    void copyArray(JavaConstant src, int srcPos, JavaConstant dest, int destPos, int length);
 
     /**
      * Writes {@code element} into {@code array} at {@code index}.
@@ -279,6 +317,22 @@ public interface VMAccess {
     void copyMemory(JavaConstant src, int srcFrom, int srcTo, byte[] dst, int dstFrom);
 
     /**
+     * Reads an unaligned primitive value from {@code array}.
+     * <p>
+     * The read starts at {@code offset} bytes from the start of the first array element (that is,
+     * not from the start of the array object) and decodes the result as {@code kind} using native
+     * endianness.
+     *
+     * @param array a {@link JavaConstant} representing a primitive array
+     * @param kind primitive kind to decode from the read bytes
+     * @param offset byte offset from the start of the first array element
+     * @return a {@link JavaConstant} of kind {@code kind}
+     * @throws IllegalArgumentException if {@code array} does not represent a primitive array, if
+     *             {@code kind} is not a primitive kind, or if {@code offset} is invalid
+     */
+    JavaConstant readPrimitiveArrayUnaligned(JavaConstant array, JavaKind kind, int offset);
+
+    /**
      * Returns a value that implements the {@code guestType} interface by calling back to
      * {@code hostTarget} through its methods.
      * <p>
@@ -372,6 +426,12 @@ public interface VMAccess {
      */
     interface Builder {
         String getVMAccessName();
+
+        /**
+         * Returns {@code true} if the VM access implementation built by this {@link Builder} will
+         * enforces full heap isolation. See {@link VMAccess#isFullyIsolated}.
+         */
+        boolean isFullyIsolated();
 
         /**
          * The class path to use. This has the semantics of the {@code --class-path} java launcher

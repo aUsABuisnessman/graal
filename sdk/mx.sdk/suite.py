@@ -604,6 +604,9 @@ suite = {
       "dependencies" : [
           "NATIVEIMAGE",
       ],
+      "annotationProcessors" : [
+        "NATIVEBRIDGE_PROCESSOR",
+      ],
       "requires" : [
       ],
       "checkstyle" : "org.graalvm.word",
@@ -614,6 +617,9 @@ suite = {
       "sourceDirs" : ["src"],
       "dependencies" : [
         "JNIUTILS"
+      ],
+      "annotationProcessors" : [
+        "NATIVEBRIDGE_PROCESSOR",
       ],
       "requires" : [
       ],
@@ -1167,6 +1173,7 @@ suite = {
                    org.graalvm.truffle.runtime.svm,
                    org.graalvm.nativeimage.builder,
                    org.graalvm.nativeimage.foreign,
+                   org.graalvm.nativeimage.guest.staging,
                    org.graalvm.nativeimage.shared,
                    com.oracle.graal.graal_enterprise,
                    com.oracle.svm.svm_enterprise,

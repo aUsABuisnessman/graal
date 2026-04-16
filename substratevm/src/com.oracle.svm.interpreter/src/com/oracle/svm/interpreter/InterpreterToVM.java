@@ -41,11 +41,8 @@ import org.graalvm.word.WordBase;
 import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.classinitialization.EnsureClassInitializedNode;
-import com.oracle.svm.core.config.ConfigurationValues;
-import com.oracle.svm.core.graal.meta.KnownOffsets;
-import com.oracle.svm.core.graal.snippets.OpenTypeWorldDispatchTableSnippets;
-import com.oracle.svm.core.hub.ClassForNameSupport;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.hub.DynamicHubUtils;
 import com.oracle.svm.core.hub.RuntimeClassLoading;
@@ -75,16 +72,6 @@ import jdk.vm.ci.meta.ResolvedJavaType;
 
 @InternalVMMethod
 public final class InterpreterToVM {
-
-    private static final JavaKind WORD_KIND = ConfigurationValues.getWordKind();
-
-    static {
-        VMError.guarantee(WORD_KIND == JavaKind.Int || WORD_KIND == JavaKind.Long);
-    }
-
-    public static JavaKind wordJavaKind() {
-        return WORD_KIND;
-    }
 
     private InterpreterToVM() {
         throw VMError.shouldNotReachHereAtRuntime();
@@ -276,6 +263,11 @@ public final class InterpreterToVM {
         frame.addLock(obj);
     }
 
+    public static void registerHeldMonitor(InterpreterFrame frame, Object obj) {
+        assert obj != null;
+        frame.addLock(obj);
+    }
+
     @SuppressFBWarnings(value = "IMSE_DONT_CATCH_IMSE", justification = "Intentional.")
     public static void monitorExit(InterpreterFrame frame, Object obj) throws SemanticJavaException {
         assert obj != null;
@@ -328,10 +320,10 @@ public final class InterpreterToVM {
     public static WordBase getFieldWord(Object obj, InterpreterResolvedJavaField wordField) throws SemanticJavaException {
         assert obj != null;
         assert wordField.isWordStorage();
-        return switch (wordJavaKind()) {
+        return switch (SubstrateTarget.getWordKind()) {
             case Long -> Word.signed(getFieldLong(obj, wordField));
             case Int -> Word.signed(getFieldInt(obj, wordField));
-            default -> throw VMError.shouldNotReachHere("Unexpected word kind " + wordJavaKind());
+            default -> throw VMError.shouldNotReachHere("Unexpected word kind " + SubstrateTarget.getWordKind());
         };
     }
 
@@ -541,10 +533,10 @@ public final class InterpreterToVM {
     public static void setFieldWord(WordBase value, Object obj, InterpreterResolvedJavaField field) {
         assert obj != null;
         ensureMaterialized(field);
-        switch (wordJavaKind()) {
+        switch (SubstrateTarget.getWordKind()) {
             case Int -> setFieldInt((int) value.rawValue(), obj, field);
             case Long -> setFieldLong(value.rawValue(), obj, field);
-            default -> throw VMError.shouldNotReachHere("Unexpected word kind " + wordJavaKind());
+            default -> throw VMError.shouldNotReachHere("Unexpected word kind " + SubstrateTarget.getWordKind());
         }
     }
 
@@ -643,7 +635,13 @@ public final class InterpreterToVM {
             // GR-55050: Hide/remove the Unsafe#allocateInstance frame e.g. use a
             // DynamicNewInstanceNode intrinsic.
             return U.allocateInstance(clazz);
-        } catch (InstantiationException | IllegalArgumentException | MissingReflectionRegistrationError e) {
+        } catch (InstantiationException e) {
+            /*
+             * Bytecode execution reports this case as InstantiationError, so translate the
+             * allocation failure to preserve the interpreter's execution semantics.
+             */
+            throw SemanticJavaException.raise(new InstantiationError(clazz.getName()));
+        } catch (IllegalArgumentException | MissingReflectionRegistrationError e) {
             throw SemanticJavaException.raise(e);
         }
     }
@@ -746,7 +744,7 @@ public final class InterpreterToVM {
         return (CFunctionPointer) codePointer;
     }
 
-    private static InterpreterResolvedJavaMethod peekAtInterpreterVTable(Class<?> seedClass, Class<?> thisClass, int vTableIndex) {
+    private static InterpreterResolvedJavaMethod peekAtInterpreterVTable(InterpreterResolvedObjectType seedType, Class<?> thisClass, int vTableIndex) {
         ResolvedJavaType thisType;
         if (RuntimeClassLoading.isSupported()) {
             thisType = DynamicHub.fromClass(thisClass).getInterpreterType();
@@ -758,32 +756,18 @@ public final class InterpreterToVM {
         VMError.guarantee(thisType != null);
         VMError.guarantee(thisType instanceof InterpreterResolvedObjectType);
 
-        InterpreterResolvedJavaMethod[] vTable = ((InterpreterResolvedObjectType) thisType).getVtable();
+        InterpreterResolvedObjectType objectType = (InterpreterResolvedObjectType) thisType;
+        InterpreterResolvedJavaMethod[] vTable = objectType.getVtable();
         VMError.guarantee(vTable != null);
 
-        DynamicHub seedHub = DynamicHub.fromClass(seedClass);
-
         int idx;
-        if (SubstrateOptions.useClosedTypeWorldHubLayout() || !seedHub.isInterface()) {
+        if (SubstrateOptions.useClosedTypeWorldHubLayout() || !seedType.isInterface()) {
             idx = vTableIndex;
         } else {
-            idx = vTableIndex + determineITableStartingIndex(DynamicHub.fromClass(thisClass), seedHub.getInterfaceID());
+            idx = vTableIndex + objectType.determineITableStartingIndex(seedType);
         }
         VMError.guarantee(idx >= 0 && idx < vTable.length);
         return vTable[idx];
-    }
-
-    private static int determineITableStartingIndex(DynamicHub thisHub, int interfaceID) {
-        /*
-         * iTableStartingOffset includes the initial offset to the vtable array and describes an
-         * offset (not index)
-         */
-        long iTableStartingOffset = OpenTypeWorldDispatchTableSnippets.determineITableStartingOffset(thisHub, interfaceID);
-
-        int vtableBaseOffset = KnownOffsets.singleton().getVTableBaseOffset();
-        int vtableEntrySize = KnownOffsets.singleton().getVTableEntrySize();
-
-        return (int) (iTableStartingOffset - vtableBaseOffset) / vtableEntrySize;
     }
 
     public static Object dispatchInvocation(InterpreterResolvedJavaMethod seedMethod, Object[] calleeArgs, CallKind callKind,
@@ -824,7 +808,7 @@ public final class InterpreterToVM {
                 return InterpreterStubSection.leaveInterpreter(target.getNativeEntryPoint(), target, calleeArgs);
             } else {
                 // Note: this call may still end up in compiled code if JIT code is available.
-                return InterpreterStubSection.call(target, calleeArgs);
+                return InterpreterStubSection.call(target, calleeArgs, false);
             }
         } catch (Throwable t) {
             throw SemanticJavaException.raise(t);
@@ -847,7 +831,7 @@ public final class InterpreterToVM {
                 // Arrays do not have a vtable
                 return seedMethod;
             } else {
-                return peekAtInterpreterVTable(seedMethod.getDeclaringClass().getJavaClass(), receiverClass, seedMethod.getVTableIndex());
+                return peekAtInterpreterVTable(seedMethod.getDeclaringClass(), receiverClass, seedMethod.getVTableIndex());
             }
         } else if (isVirtual && seedMethod.isDevirtualized()) {
             InterpreterResolvedJavaMethod target = seedMethod.devirtualizationTarget();
@@ -862,8 +846,11 @@ public final class InterpreterToVM {
     }
 
     private static boolean shouldCallAOTEntryPoint(boolean forceStayInInterpreter, boolean preferStayInInterpreter, InterpreterResolvedJavaMethod target, boolean quiet) {
-        boolean canBeInterpreterInvoked = target.hasBytecodes() || (RuntimeClassLoading.isSupported() && target.isSignaturePolymorphicIntrinsic());
-        boolean canBeAOTCalled = target.hasNativeEntryPoint() && target.getNativeEntryPoint().isNonNull();
+        boolean canBeInterpreterInvoked = target.hasBytecodes() ||
+                        (RuntimeClassLoading.isSupported() && target.isSignaturePolymorphicIntrinsic());
+        boolean canBeAOTCalled = target.hasNativeEntryPoint() &&
+                        target.getNativeEntryPoint().isNonNull() &&
+                        !target.getNativeEntryPoint().equal(InterpreterNotCompiledMethodPointerHolder.getMethodNotCompiledHandler());
 
         if (!canBeInterpreterInvoked && !canBeAOTCalled) {
             String source;
@@ -876,9 +863,14 @@ public final class InterpreterToVM {
                 }
             } else {
                 source = "AOT";
-                if (!ClassForNameSupport.isPreserved(target.getDeclaringClass().getJavaClass())) {
-                    String dotPkg = target.getDeclaringClass().getSymbolicRuntimePackage().toString().replace('/', '.');
-                    reason = MetadataUtil.fmt("Class was not preserved during image build. Consider using '-H:Preserve=package=%s'.", dotPkg);
+                String dotPkg = target.getDeclaringClass().getSymbolicRuntimePackage().toString().replace('/', '.');
+                if (!DynamicHub.fromClass(target.getDeclaringClass().getJavaClass()).isPreserved()) {
+                    reason = MetadataUtil.fmt("Class %s was not preserved during image build.%nConsider using '-H:Preserve=package=%s'.", target.getDeclaringClass().toClassName(), dotPkg);
+                }
+                if (target.getNativeEntryPoint().equal(InterpreterNotCompiledMethodPointerHolder.getMethodNotCompiledHandler())) {
+                    reason = MetadataUtil.fmt(
+                                    "Trying to dispatch to compiled code for AOT method %s but it was not compiled because it was not seen as reachable by analysis.%nConsider using '-H:Preserve=package=%s'",
+                                    target, dotPkg);
                 }
             }
             InterpreterUtil.guarantee(false, "Unable to call %s method: %s%n%s", source, target, reason);

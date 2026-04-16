@@ -30,7 +30,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Predicate;
-import java.util.function.Supplier;
 
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platforms;
@@ -56,7 +55,7 @@ import com.oracle.svm.configure.config.conditional.AccessConditionResolver;
 import com.oracle.svm.core.c.ProjectHeaderFile;
 import com.oracle.svm.core.c.ProjectHeaderFileHeaderResolversRegistryFeature;
 import com.oracle.svm.core.code.ImageCodeInfo;
-import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
+import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.graal.meta.RuntimeConfiguration;
 import com.oracle.svm.core.graal.meta.SubstrateForeignCallsProvider;
@@ -72,7 +71,6 @@ import com.oracle.svm.core.log.Log;
 import com.oracle.svm.core.log.Loggers;
 import com.oracle.svm.core.log.NoopLog;
 import com.oracle.svm.hosted.FeatureImpl;
-import com.oracle.svm.hosted.GuestTypes;
 import com.oracle.svm.hosted.HostedConfiguration;
 import com.oracle.svm.hosted.ImageClassLoader;
 import com.oracle.svm.hosted.classinitialization.ClassInitializationSupport;
@@ -118,10 +116,6 @@ import jdk.graal.compiler.debug.DebugContext;
 import jdk.graal.compiler.graph.Node;
 import jdk.graal.compiler.options.OptionValues;
 import jdk.graal.compiler.phases.util.Providers;
-import jdk.graal.compiler.vmaccess.VMAccess;
-import jdk.vm.ci.meta.JavaConstant;
-import jdk.vm.ci.meta.MetaAccessProvider;
-import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
@@ -157,8 +151,6 @@ public class WebImageFeature implements InternalFeature {
     public void beforeAnalysis(BeforeAnalysisAccess access) {
         FeatureImpl.BeforeAnalysisAccessImpl a = (FeatureImpl.BeforeAnalysisAccessImpl) access;
         AnalysisMetaAccess metaAccess = a.getMetaAccess();
-        MetaAccessProvider originalMetaAccess = metaAccess.getWrapped();
-        ImageClassLoader imageClassLoader = a.getImageClassLoader();
         BigBang bigbang = a.getBigBang();
 
         // For DynamicNewArrayLowerer
@@ -193,52 +185,13 @@ public class WebImageFeature implements InternalFeature {
         }
 
         LowerableResources.processResources(a, WebImageHostedConfiguration.get());
-
-        /*
-         * Clear caches for Locale and BaseLocale.
-         *
-         * These caches can contribute ~1MB to the image size, clearing them avoids this overhead at
-         * the cost of having to recreate the Locale and BaseLocale objects once when they're
-         * requested.
-         *
-         * On JDK21, ReferencedKeySet and ReferencedKeyMap don't exist. We have to go through
-         * reflection to access them because analysis tools like spotbugs still run on JDK21
-         */
-        GuestTypes guestTypes = imageClassLoader.guestTypes;
-        ResolvedJavaType baseLocaleInterningCacheType = guestTypes.findType("sun.util.locale.BaseLocale$1InterningCache").getOrFail();
-        ResolvedJavaField baseLocaleCacheField = JVMCIReflectionUtil.getUniqueDeclaredField(baseLocaleInterningCacheType, "CACHE");
-        ResolvedJavaType localeCacheType = guestTypes.findType("java.util.Locale$LocaleCache").getOrFail();
-        ResolvedJavaField localeCacheField = JVMCIReflectionUtil.getUniqueDeclaredField(localeCacheType, "LOCALE_CACHE");
-        VMAccess vmAccess = GuestAccess.get();
-
-        a.registerFieldValueTransformer(baseLocaleCacheField, (receiver, originalValue) -> {
-            /*
-             * Executes `ReferencedKeySet.create(true,
-             * ReferencedKeySet.concurrentHashMapSupplier())` with reflection.
-             */
-            ResolvedJavaType referencedKeySetClazz = guestTypes.findType("jdk.internal.util.ReferencedKeySet").getOrFail();
-            ResolvedJavaMethod createMethod = JVMCIReflectionUtil.getUniqueDeclaredMethod(originalMetaAccess, referencedKeySetClazz, "create", boolean.class, Supplier.class);
-            ResolvedJavaMethod concurrentHashMapSupplierMethod = JVMCIReflectionUtil.getUniqueDeclaredMethod(originalMetaAccess, referencedKeySetClazz, "concurrentHashMapSupplier");
-            return vmAccess.invoke(createMethod, null, JavaConstant.TRUE, vmAccess.invoke(concurrentHashMapSupplierMethod, null));
-        });
-
-        a.registerFieldValueTransformer(localeCacheField, (receiver, originalValue) -> {
-            /*
-             * Executes `ReferencedKeyMap.create(true,
-             * ReferencedKeyMap.concurrentHashMapSupplier())` with reflection.
-             */
-            ResolvedJavaType referencedKeyMapClazz = imageClassLoader.guestTypes.findType("jdk.internal.util.ReferencedKeyMap").getOrFail();
-            ResolvedJavaMethod createMethod = JVMCIReflectionUtil.getUniqueDeclaredMethod(originalMetaAccess, referencedKeyMapClazz, "create", boolean.class, Supplier.class);
-            ResolvedJavaMethod concurrentHashMapSupplierMethod = JVMCIReflectionUtil.getUniqueDeclaredMethod(originalMetaAccess, referencedKeyMapClazz, "concurrentHashMapSupplier");
-            return vmAccess.invoke(createMethod, null, JavaConstant.TRUE, vmAccess.invoke(concurrentHashMapSupplierMethod, null));
-        });
     }
 
     @Override
     public void duringSetup(DuringSetupAccess a) {
         FeatureImpl.DuringSetupAccessImpl access = (FeatureImpl.DuringSetupAccessImpl) a;
 
-        String entryPointConfig = WebImageOptions.EntryPointsConfig.getValue(ImageSingletons.lookup(HostedOptionValues.class));
+        String entryPointConfig = WebImageOptions.EntryPointsConfig.getValue(HostedOptionValues.singleton().get());
         if (entryPointConfig != null) {
             AccessConditionResolver<AccessCondition> conditionResolver = new NativeImageConditionResolver(access.getImageClassLoader(),
                             ClassInitializationSupport.singleton());
@@ -282,7 +235,7 @@ public class WebImageFeature implements InternalFeature {
         if (WebImageOptions.supportRuntime(WebImageOptions.VMType.Browser)) {
             ImageSingletons.add(WebImageHttpHandlerSubstitutions.class, new WebImageHttpHandlerSubstitutions());
         }
-        if (WebImageOptions.UseRandomForTempFiles.getValue(HostedOptionValues.singleton())) {
+        if (WebImageOptions.UseRandomForTempFiles.getValue(HostedOptionValues.singleton().get())) {
             ImageSingletons.add(WebImageTempFileHelperSupport.class, new WebImageTempFileHelperSupportWithoutSecureRandom());
         } else {
             ImageSingletons.add(WebImageTempFileHelperSupport.class, new WebImageTempFileHelperSupport());
