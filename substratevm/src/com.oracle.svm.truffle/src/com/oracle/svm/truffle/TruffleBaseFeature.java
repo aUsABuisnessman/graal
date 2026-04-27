@@ -65,8 +65,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
+import com.oracle.svm.core.stack.StackOverflowCheck;
+import com.oracle.svm.shared.util.ModuleSupport;
+import jdk.internal.misc.TerminatingThreadLocal;
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.EconomicSet;
 import org.graalvm.collections.Pair;
@@ -120,6 +124,10 @@ import com.oracle.svm.hosted.classinitialization.ClassInitializationSupport;
 import com.oracle.svm.hosted.heap.PodSupport;
 import com.oracle.svm.hosted.snippets.SubstrateGraphBuilderPlugins;
 import com.oracle.svm.shared.option.HostedOptionKey;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.Disallowed;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.shared.util.VMError;
@@ -165,6 +173,7 @@ import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugins.Registration;
 import jdk.graal.compiler.options.Option;
 import jdk.graal.compiler.phases.tiers.Suites;
 import jdk.graal.compiler.phases.util.Providers;
+import jdk.graal.compiler.truffle.BytecodeHandlerConfig;
 import jdk.graal.compiler.truffle.host.TruffleHostEnvironment;
 import jdk.graal.compiler.truffle.substitutions.TruffleInvocationPlugins;
 import jdk.internal.misc.Unsafe;
@@ -177,6 +186,7 @@ import jdk.vm.ci.meta.ResolvedJavaMethod;
  * {@link TruffleFeature}'s dependency), then {@link TruffleRuntime} <b>must</b> be set to the
  * {@link DefaultTruffleRuntime}.
  */
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
 public final class TruffleBaseFeature implements InternalFeature {
 
     private static final MethodHandle VERSION_GET_COMPONENT = findVersionGetComponent();
@@ -231,7 +241,14 @@ public final class TruffleBaseFeature implements InternalFeature {
     public static final class IsEnabled implements BooleanSupplier {
         @Override
         public boolean getAsBoolean() {
-            return ImageSingletons.contains(TruffleBaseFeature.class);
+            boolean enabled = ImageSingletons.contains(TruffleBaseFeature.class);
+            if (enabled) {
+                // Workaround for GR-75049: @SVMTest does not correctly process
+                // META-INF/native-image.properties directives
+                Module javaBase = ModuleLayer.boot().findModule("java.base").orElseThrow();
+                ModuleSupport.accessModuleByClass(ModuleSupport.Access.EXPORT, TruffleBaseFeature.class, javaBase, "jdk.internal.misc");
+            }
+            return enabled;
         }
     }
 
@@ -285,9 +302,11 @@ public final class TruffleBaseFeature implements InternalFeature {
     private final SubstrateTruffleBytecodeHandlerStubHelper stubHelper = new SubstrateTruffleBytecodeHandlerStubHelper();
 
     /**
-     * Contains tuples of (handlerMethod, handlerStub) but also (callerMethod, defaultHandlerStub).
+     * Contains mappings of handler/interpreter methods paired with their
+     * {@link BytecodeHandlerConfig} to stub wrappers. Interpreter root methods map to default stubs
+     * while handler methods map to specialized stubs.
      */
-    private final EconomicMap<ResolvedJavaMethod, ResolvedJavaMethod> registeredBytecodeHandlers = EconomicMap.create();
+    private final EconomicMap<BytecodeHandlerStubKey, ResolvedJavaMethod> registeredBytecodeHandlers = EconomicMap.create();
     private EconomicSet<ResolvedJavaMethod> bytecodeHandlers;
 
     private static void initializeTruffleReflectively(ClassLoader imageClassLoader) {
@@ -1747,4 +1766,29 @@ final class Target_com_oracle_truffle_api_dsl_InlineSupport_UnsafeField {
         }
     }
 
+}
+
+@TargetClass(className = "com.oracle.truffle.api.impl.DefaultTruffleRuntime", onlyWith = TruffleBaseFeature.IsEnabled.class)
+final class Target_com_oracle_truffle_api_impl_DefaultTruffleRuntime {
+
+    @Substitute
+    static <T> ThreadLocal<T> createTerminatingThreadLocal(Supplier<T> initialValue, Consumer<T> onThreadTermination) {
+        return new TerminatingThreadLocal<>() {
+
+            @Override
+            protected T initialValue() {
+                return initialValue.get();
+            }
+
+            @Override
+            protected void threadTerminated(T value) {
+                onThreadTermination.accept(value);
+            }
+        };
+    }
+
+    @Substitute
+    static long getStackOverflowLimit() {
+        return ImageSingletons.lookup(StackOverflowCheck.class).getStackOverflowBoundary().rawValue();
+    }
 }

@@ -56,6 +56,13 @@ public abstract class InterpreterResolvedJavaType extends InterpreterAnnotated i
     public static final InterpreterResolvedJavaType[] EMPTY_ARRAY = new InterpreterResolvedJavaType[0];
 
     private final Symbol<Type> type;
+    /**
+     * The corresponding class for this type.
+     * <p>
+     * Note that this can be {@code null} when this instance represents a type from another JVM as
+     * in the case of the JDWP server process/isolate. See
+     * {@link InterpreterResolvedObjectType#createWithOpaqueClass}.
+     */
     protected final Class<?> clazz;
     private final JavaConstant clazzConstant;
     private final boolean isWordType;
@@ -120,6 +127,10 @@ public abstract class InterpreterResolvedJavaType extends InterpreterAnnotated i
     // This is only here for performance, otherwise the clazzConstant must be unwrapped every time.
     public final Class<?> getJavaClass() {
         return MetadataUtil.requireNonNull(clazz);
+    }
+
+    public static InterpreterResolvedJavaType fromClass(Class<?> javaClass) {
+        return (InterpreterResolvedJavaType) DynamicHub.fromClass(javaClass).getInterpreterType();
     }
 
     public final DynamicHub getHub() {

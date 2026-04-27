@@ -1,6 +1,5 @@
 /*
- * Copyright (c) 2022, 2022, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2022, 2022, Alibaba Group Holding Limited. All rights reserved.
+ * Copyright (c) 2026, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,33 +22,19 @@
  * or visit www.oracle.com if you need additional information or have any
  * questions.
  */
+package com.oracle.svm.core.graal.code;
 
-package com.oracle.graal.pointsto.standalone.test;
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
 
-public class ConstantFieldCase {
-    public static final ConstantType constantField = new ConstantType();
-    /*
-     * This sink keeps the hash computation side-effectful for the standalone analysis test without
-     * adding extra observable behavior to the exercised code path.
-     */
-    @SuppressWarnings("unused") private static volatile int sink;
-
-    public static void main(String[] args) {
-        constantField.foo();
-    }
-
-    static class ConstantType {
-        public void foo() {
-            consume("first");
-            consume("second");
-        }
-    }
-
-    /**
-     * Forces the test constant to execute {@link String#hashCode()} without changing the expected
-     * observable behavior of the test case.
-     */
-    private static void consume(String value) {
-        sink ^= value.hashCode();
+/**
+ * Reference to CGlobalData, accessed indirectly through the image heap. Use to avoid emitting a
+ * dynamic linker relocation. Final address is computed at runtime by reading the CGlobalData base
+ * address from the image heap and adding a relative offset to it.
+ */
+@Platforms(Platform.HOSTED_ONLY.class)
+public final class CGlobalDataIndirectReference extends CGlobalDataReference {
+    public CGlobalDataIndirectReference(CGlobalDataInfo dataInfo) {
+        super(dataInfo);
     }
 }

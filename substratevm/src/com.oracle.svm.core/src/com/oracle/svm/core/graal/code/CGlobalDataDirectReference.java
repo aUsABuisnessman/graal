@@ -1,6 +1,5 @@
 /*
- * Copyright (c) 2022, 2022, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2022, 2022, Alibaba Group Holding Limited. All rights reserved.
+ * Copyright (c) 2026, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,22 +22,18 @@
  * or visit www.oracle.com if you need additional information or have any
  * questions.
  */
+package com.oracle.svm.core.graal.code;
 
-package com.oracle.graal.pointsto.standalone.test;
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
 
-public class ClassEqualityCase {
-    static class C {
-        public static void foo() {
-        }
-    }
-
-    public static void main(String[] args) {
-        equals(C.class);
-    }
-
-    private static void equals(Class<?> clazz) {
-        if (clazz == C.class) {
-            C.foo();
-        }
+/**
+ * Reference to CGlobalData accessed directly through relative addressing. Emits a dynamic linker
+ * relocation.
+ */
+@Platforms(Platform.HOSTED_ONLY.class)
+public final class CGlobalDataDirectReference extends CGlobalDataReference {
+    public CGlobalDataDirectReference(CGlobalDataInfo dataInfo) {
+        super(dataInfo);
     }
 }

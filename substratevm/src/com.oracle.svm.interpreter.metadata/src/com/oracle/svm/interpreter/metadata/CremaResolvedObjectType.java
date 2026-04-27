@@ -24,8 +24,6 @@
  */
 package com.oracle.svm.interpreter.metadata;
 
-import static com.oracle.svm.espresso.classfile.Constants.ACC_IS_HIDDEN_CLASS;
-
 import java.util.ArrayList;
 import java.util.List;
 
@@ -34,6 +32,7 @@ import com.oracle.svm.core.hub.RuntimeClassLoading;
 import com.oracle.svm.core.hub.crema.CremaResolvedJavaMethod;
 import com.oracle.svm.core.hub.crema.CremaResolvedJavaRecordComponent;
 import com.oracle.svm.core.hub.crema.CremaResolvedJavaType;
+import com.oracle.svm.espresso.classfile.Constants;
 import com.oracle.svm.espresso.classfile.ParserKlass;
 import com.oracle.svm.espresso.classfile.attributes.Attribute;
 import com.oracle.svm.espresso.classfile.attributes.AttributedElement;
@@ -73,11 +72,11 @@ public final class CremaResolvedObjectType extends InterpreterResolvedObjectType
     // GR-70720: Allow AOT types as nest host.
     private CremaResolvedObjectType host;
 
-    public CremaResolvedObjectType(ParserKlass parserKlass, int modifiers, InterpreterResolvedJavaType componentType, InterpreterResolvedObjectType superclass,
+    public CremaResolvedObjectType(ParserKlass parserKlass, InterpreterResolvedJavaType componentType, InterpreterResolvedObjectType superclass,
                     InterpreterResolvedObjectType[] interfaces,
                     InterpreterConstantPool constantPool, Class<?> javaClass, boolean isWordType,
                     int staticReferenceFields, int staticPrimitiveFieldsSize) {
-        super(parserKlass.getType(), modifiers, componentType, superclass, interfaces, constantPool, javaClass, isWordType);
+        super(parserKlass.getType(), parserKlass.getFlags() & Constants.JVM_RECOGNIZED_CLASS_MODIFIERS, componentType, superclass, interfaces, constantPool, javaClass, isWordType);
         this.primitiveStatics = new byte[staticPrimitiveFieldsSize];
         this.referenceStatics = new Object[staticReferenceFields];
         this.attributes = parserKlass.getAttributes();
@@ -220,11 +219,6 @@ public final class CremaResolvedObjectType extends InterpreterResolvedObjectType
     }
 
     @Override
-    public boolean isHidden() {
-        return (getModifiers() & ACC_IS_HIDDEN_CLASS) != 0;
-    }
-
-    @Override
     public JavaType[] getPermittedSubClasses() {
         PermittedSubclassesAttribute permittedSubclasses = getAttribute(PermittedSubclassesAttribute.NAME, PermittedSubclassesAttribute.class);
         if (permittedSubclasses == null || permittedSubclasses.getClasses().length == 0) {
@@ -317,7 +311,6 @@ public final class CremaResolvedObjectType extends InterpreterResolvedObjectType
     }
 
     private boolean sameRuntimePackage(InterpreterResolvedJavaType other) {
-        // GR-62339 true package access checks
         return this.getJavaClass().getClassLoader() == other.getJavaClass().getClassLoader() && this.getSymbolicRuntimePackage() == other.getSymbolicRuntimePackage();
     }
 

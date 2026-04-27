@@ -41,7 +41,9 @@
 package com.oracle.truffle.polyglot.isolate;
 
 import com.oracle.truffle.api.InternalResource;
+import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.impl.Accessor;
+import com.oracle.truffle.api.impl.DefaultTruffleRuntime;
 import com.oracle.truffle.api.impl.PolyglotIsolateLanguages;
 import org.graalvm.collections.Pair;
 import org.graalvm.home.HomeFinder;
@@ -90,13 +92,29 @@ final class PolyglotIsolateHostSupport {
     private static volatile Lazy lazy;
 
     static Engine buildIsolatedEngine(AbstractPolyglotImpl polyglot, Engine localEngine, String[] isolateLanguages, String[] permittedLanguages, SandboxPolicy sandboxPolicy, OutputStream out,
-                    OutputStream err, InputStream in, Map<String, String> options,
+                    OutputStream err, InputStream in, Map<String, String> options, Map<String, String> systemPropertiesOptions, boolean useSystemProperties,
                     boolean allowExperimentalOptions, boolean boundEngine, MessageTransport messageInterceptor, boolean registerInActiveEngines, boolean externalProcess, long stackHeadroom,
                     String isolateLibrary, String isolateLauncher) {
         assert isolateLanguages != null;
+
+        if (!ImageInfo.inImageCode() && Truffle.getRuntime() instanceof DefaultTruffleRuntime && PolyglotIsolateAccessor.ENGINE.getModulesAccessor() == null) {
+            /*
+             * On HotSpot, polyglot isolates running with the fallback Truffle runtime require
+             * libtruffleattach to provide stack-limit support and terminating thread locals.
+             * Loading libtruffleattach can fail for several reasons, such as a missing library,
+             * incorrect packaging, loading from multiple class loaders, or missing native-access
+             * permissions. In that case isolate hosting cannot continue, so we abort and include
+             * the original libtruffleattach initialization error in the failure message.
+             */
+            String moduleAccessorInitError = PolyglotIsolateAccessor.ENGINE.getModuleAccessorInitializationError();
+            throw new IllegalStateException("Polyglot isolates require libtruffleattach when running on HotSpot with the fallback Truffle runtime. " +
+                            "The libtruffleattach library could not be loaded: " + moduleAccessorInitError + " " +
+                            "Resolve the libtruffleattach loading issue, or switch to the optimized Truffle runtime.");
+        }
         APIAccess apiAccess = polyglot.getAPIAccess();
         LibraryConfig libraryConfig = resolveIsolatePaths(apiAccess.getEngineReceiver(localEngine), isolateLibrary, isolateLauncher, permittedLanguages, isolateLanguages);
-        return spawnIsolatedEngine(polyglot, localEngine, permittedLanguages, sandboxPolicy, out, err, in, options, allowExperimentalOptions, boundEngine, messageInterceptor,
+        return spawnIsolatedEngine(polyglot, localEngine, permittedLanguages, sandboxPolicy, out, err, in, options, systemPropertiesOptions, useSystemProperties, allowExperimentalOptions, boundEngine,
+                        messageInterceptor,
                         libraryConfig, registerInActiveEngines, externalProcess, stackHeadroom);
     }
 
@@ -252,7 +270,8 @@ final class PolyglotIsolateHostSupport {
 
     private static Engine spawnIsolatedEngine(AbstractPolyglotImpl polyglot, Engine localEngine, String[] permittedLanguages, SandboxPolicy sandboxPolicy, OutputStream out, OutputStream err,
                     InputStream in,
-                    Map<String, String> options, boolean allowExperimentalOptions, boolean boundEngine, MessageTransport messageInterceptor, LibraryConfig libraryConfig,
+                    Map<String, String> options, Map<String, String> systemPropertiesOptions, boolean useSystemProperties,
+                    boolean allowExperimentalOptions, boolean boundEngine, MessageTransport messageInterceptor, LibraryConfig libraryConfig,
                     boolean registerInActiveEngines, boolean externalProcess, long stackHeadroom) {
         if (!ImageInfo.inImageCode()) {
             Accessor.ModulesAccessor moduleAccessor = PolyglotIsolateAccessor.ENGINE.getModulesAccessor();
@@ -285,8 +304,8 @@ final class PolyglotIsolateHostSupport {
             AbstractPolyglotImpl.AbstractEngineDispatch localEngineDispatch = apiAccess.getEngineDispatch(localEngine);
             AbstractPolyglotImpl.LogHandler localEngineLogHandler = PolyglotIsolateAccessor.ENGINE.getEngineLogHandler(localEngineReceiver);
             AbstractPolyglotImpl.AbstractHostLanguageService localHostService = PolyglotIsolateAccessor.ENGINE.getHostService(apiAccess.getEngineReceiver(localEngine));
-            long engineHandle = polyglotIsolateServices.buildEngine(permittedLanguages, sandboxPolicy, out, err, in, options, allowExperimentalOptions, boundEngine, messageInterceptor,
-                            localEngineLogHandler, l.notificationHostService, localHostService);
+            long engineHandle = polyglotIsolateServices.buildEngine(permittedLanguages, sandboxPolicy, out, err, in, options, systemPropertiesOptions, useSystemProperties,
+                            allowExperimentalOptions, boundEngine, messageInterceptor, localEngineLogHandler, l.notificationHostService, localHostService);
             Peer enginePeer = Peer.create(isolate, engineHandle);
             ForeignEngine foreignEngine = new ForeignEngine(enginePeer, localEngine, boundEngine, stackHeadroom, polyglotIsolateServices);
             Engine e = apiAccess.newEngine(getEngineDispatch(foreignEngine), foreignEngine, registerInActiveEngines);

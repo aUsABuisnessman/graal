@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -111,8 +111,8 @@ import com.oracle.truffle.dsl.processor.bytecode.model.OperationModel;
 import com.oracle.truffle.dsl.processor.bytecode.model.OperationModel.OperationArgument;
 import com.oracle.truffle.dsl.processor.bytecode.model.OperationModel.OperationKind;
 import com.oracle.truffle.dsl.processor.bytecode.model.ShortCircuitInstructionModel;
-import com.oracle.truffle.dsl.processor.bytecode.model.SourceSectionKind;
 import com.oracle.truffle.dsl.processor.bytecode.model.Signature.Operand;
+import com.oracle.truffle.dsl.processor.bytecode.model.SourceSectionKind;
 import com.oracle.truffle.dsl.processor.generator.GeneratorUtils;
 import com.oracle.truffle.dsl.processor.java.ElementUtils;
 import com.oracle.truffle.dsl.processor.java.model.CodeExecutableElement;
@@ -2658,8 +2658,7 @@ final class BuilderElement extends AbstractElement {
         for (VariableElement e : ElementFilter.fieldsIn(parent.abstractBytecodeNode.getEnclosedElements())) {
             b.defaultDeclaration(e.asType(), e.getSimpleName().toString() + "_");
         }
-        String sourceBits = parent.configEncoder.encodeSourceBits("parseSources", "parseSourceContent");
-        b.startAssign("configEncoding_").string(parent.configEncoder.encode(sourceBits, "instrumentations", "tags")).end();
+        b.startAssign("configEncoding_").tree(parent.configEncoder.encode("parseSources", "parseSourceContent", "instrumentations", "tags", "state.continuationsIndex != 0")).end();
 
         b.statement("doEmitRootSourceInfo(", operationStack.read(model.rootOperation, operationFields.index), ")");
         b.startIf().string("parseSources").end().startBlock();
@@ -2717,7 +2716,7 @@ final class BuilderElement extends AbstractElement {
 
         b.startIf().string("parseBytecodes").end().startBlock();
         b.declaration(parent.abstractBytecodeNode.asType(), "oldBytecodeNode", "result.bytecode");
-        b.statement("assert result.maxLocals == " + maxLocals());
+        b.statement("assert result.stackBase == " + stackBase());
         b.statement("assert result.nodes == this.nodes");
         b.startAssert();
         b.string("result.getFrameDescriptor().getNumberOfSlots() == ");
@@ -2736,23 +2735,25 @@ final class BuilderElement extends AbstractElement {
                 b.statement("assert constants_.length == oldBytecodeNode.constants.length");
             }
 
-            /**
+            /*
              * Copy ContinuationRootNodes into new constant array *before* we update the new
              * bytecode, otherwise a racy thread may read it as null
              */
+            b.lineComment("Patch the existing continuation roots into the new constant pool.");
             b.startFor().string("int i = 0; i < continuationsIndex; i = i + CONTINUATION_LENGTH").end().startBlock();
             b.declaration(type(int.class), "constantPoolIndex", "continuations[i + CONTINUATION_OFFSET_CPI]");
             if (model.enableInstructionTracing) {
-                b.lineComment("The constant offset is 1 with instruction tracing enabled. See INSTRUCTION_TRACER_CONSTANT_INDEX.");
-                b.lineComment("We need to align constant indices for the continuation root node updates.");
+                b.lineComment("The constant pool layout can change when tracing is enabled. See INSTRUCTION_TRACER_CONSTANT_INDEX.");
                 b.declaration(type(int.class), "oldConstantPoolIndex", "constantPoolIndex - newConstantOffset + oldConstantOffset");
+                b.statement("continuations[i + CONTINUATION_OFFSET_OLD_CPI] = oldConstantPoolIndex");
+                b.startDeclaration(parent.continuationRootNodeImpl.asType(), "continuationRootNode");
+                b.cast(parent.continuationRootNodeImpl.asType()).string("oldBytecodeNode.constants[oldConstantPoolIndex]");
+                b.end();
             } else {
-                b.declaration(type(int.class), "oldConstantPoolIndex", "constantPoolIndex");
+                b.startDeclaration(parent.continuationRootNodeImpl.asType(), "continuationRootNode");
+                b.cast(parent.continuationRootNodeImpl.asType()).string("oldBytecodeNode.constants[constantPoolIndex]");
+                b.end();
             }
-            b.startDeclaration(parent.continuationRootNodeImpl.asType(), "continuationRootNode");
-            b.cast(parent.continuationRootNodeImpl.asType()).string("oldBytecodeNode.constants[oldConstantPoolIndex]");
-
-            b.end();
 
             b.startStatement().startCall("ACCESS.writeObject");
             b.string("constants_");
@@ -2804,7 +2805,7 @@ final class BuilderElement extends AbstractElement {
         b.string("language");
         b.string("frameDescriptorBuilder");
         b.string("nodes"); // BytecodeRootNodesImpl
-        b.string(maxLocals());
+        b.string(stackBase());
         if (model.usesBoxingElimination()) {
             b.string("state.numLocals");
         }
@@ -2822,7 +2823,7 @@ final class BuilderElement extends AbstractElement {
             b.declaration(type(int.class), "constantPoolIndex", "continuations[i + CONTINUATION_OFFSET_CPI]");
             b.declaration(type(int.class), "continuationBci", "continuations[i + CONTINUATION_OFFSET_BCI]");
             // Convert the relative sp to an absolute index in the frame.
-            b.declaration(type(int.class), "continuationSp", "continuations[i + CONTINUATION_OFFSET_SP] + " + maxLocals());
+            b.declaration(type(int.class), "continuationSp", "continuations[i + CONTINUATION_OFFSET_SP] + " + stackBase());
 
             b.declaration(types.BytecodeLocation, "location");
             b.startIf().string("continuationBci == -1").end().startBlock();
@@ -2833,7 +2834,6 @@ final class BuilderElement extends AbstractElement {
 
             b.startDeclaration(parent.continuationRootNodeImpl.asType(), "continuationRootNode").startNew(parent.continuationRootNodeImpl.asType());
             b.string("language");
-            b.string("result.getFrameDescriptor()");
             b.string("result");
             b.string("continuationSp");
             b.string("location");
@@ -2864,10 +2864,10 @@ final class BuilderElement extends AbstractElement {
     }
 
     private void buildFrameSize(CodeTreeBuilder b) {
-        b.string("state.maxStackHeight + ").string(maxLocals());
+        b.string("state.maxStackHeight + ").string(stackBase());
     }
 
-    private String maxLocals() {
+    private String stackBase() {
         if (model.enableBlockScoping) {
             return "state.maxLocals + USER_LOCALS_START_INDEX";
         } else {
@@ -3522,7 +3522,6 @@ final class BuilderElement extends AbstractElement {
         List<InstructionImmediate> immediates = instruction.getImmediates();
         String[] args = new String[immediates.size()];
 
-        int childBciIndex = 0;
         int constantIndex = 0;
         for (int i = 0; i < immediates.size(); i++) {
             InstructionImmediate immediate = immediates.get(i);
@@ -3536,15 +3535,18 @@ final class BuilderElement extends AbstractElement {
                         yield customChildBci;
                     } else {
                         if (operation.isTransparent) {
-                            if (childBciIndex != 0) {
+                            if (instruction.resolveDynamicOperandIndex(immediate).orElse(-1) != 0) {
                                 throw new AssertionError("Unexpected transparent child.");
                             }
-                            childBciIndex++;
                             yield operationStack.read(operation, operationFields.childBci);
                         } else {
-                            String childBci = "childBci" + childBciIndex;
-                            b.declaration(type(int.class), childBci, operationStack.read(operation, operationFields.getChildBci(childBciIndex, false)));
-                            childBciIndex++;
+                            Operand operand = instruction.resolveOperand(immediate).orElseThrow(
+                                            () -> new AssertionError("Instruction immediate is missing a linked operand: " + immediate));
+                            if (!operand.isDynamic()) {
+                                throw new AssertionError("Expected a dynamic operand for child bci immediate: " + immediate);
+                            }
+                            String childBci = getChildBciName(operand.dynamicIndex());
+                            b.declaration(type(int.class), childBci, operationStack.read(operation, operationFields.getChildBci(operand.dynamicIndex(), false)));
                             yield childBci;
                         }
                     }
@@ -4035,7 +4037,6 @@ final class BuilderElement extends AbstractElement {
                 case CUSTOM:
                 case CUSTOM_YIELD:
                 case CUSTOM_INSTRUMENTATION:
-                    int immediateIndex = 0;
                     boolean elseIf = false;
 
                     for (Operand operand : op.instruction.signature.dynamicOperands()) {
@@ -4043,8 +4044,7 @@ final class BuilderElement extends AbstractElement {
                             elseIf = b.startIf(elseIf);
                             b.string("childIndex == " + operand.dynamicIndex()).end().startBlock();
 
-                            int index = immediateIndex++;
-                            b.tree(operationStack.write(op, operationFields.getChildBci(index, false), "childBci"));
+                            b.tree(operationStack.write(op, operationFields.getChildBci(operand.dynamicIndex(), false), "childBci"));
                             b.end();
                         }
                     }
@@ -4171,6 +4171,10 @@ final class BuilderElement extends AbstractElement {
             };
         }
         return branchArguments;
+    }
+
+    private static String getChildBciName(int childIndex) {
+        return "child" + childIndex + "Bci";
     }
 
     private CodeExecutableElement createSafeCastShort() {
@@ -5550,14 +5554,28 @@ final class BuilderElement extends AbstractElement {
             b.statement("table = this.continuations = Arrays.copyOf(this.continuations, this.continuations.length * 2)");
             b.end();
 
-            b.statement("table[index + CONTINUATION_OFFSET_CPI] = cpi");
             b.statement("table[index + CONTINUATION_OFFSET_BCI] = continuationBci");
             b.statement("table[index + CONTINUATION_OFFSET_SP] = sp");
+            b.statement("table[index + CONTINUATION_OFFSET_CPI] = cpi");
+            if (model.enableInstructionTracing) {
+                /*
+                 * The old class pool index is the same unless tracing was newly enabled. In such a
+                 * case, it will be patched in endRoot.
+                 */
+                b.statement("table[index + CONTINUATION_OFFSET_OLD_CPI] = cpi");
+            }
 
-            parent.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(int.class), "CONTINUATION_OFFSET_CPI")).createInitBuilder().string("0");
-            parent.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(int.class), "CONTINUATION_OFFSET_BCI")).createInitBuilder().string("1");
-            parent.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(int.class), "CONTINUATION_OFFSET_SP")).createInitBuilder().string("2");
-            parent.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(int.class), "CONTINUATION_LENGTH")).createInitBuilder().string("3");
+            int offset = 0;
+            parent.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(int.class), "CONTINUATION_OFFSET_BCI")).createInitBuilder().string(Integer.toString(offset++));
+            parent.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(int.class), "CONTINUATION_OFFSET_SP")).createInitBuilder().string(Integer.toString(offset++));
+            parent.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(int.class), "CONTINUATION_OFFSET_CPI")).createInitBuilder().string(Integer.toString(offset++));
+            if (model.enableInstructionTracing) {
+                CodeVariableElement continuationOldCpiOffset = parent.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(int.class), "CONTINUATION_OFFSET_OLD_CPI"));
+                BytecodeRootNodeElement.addJavadoc(continuationOldCpiOffset,
+                                "The corresponding constant pool index for this continuation in the old bytecode (only used during reparsing).");
+                continuationOldCpiOffset.createInitBuilder().string(Integer.toString(offset++));
+            }
+            parent.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(int.class), "CONTINUATION_LENGTH")).createInitBuilder().string(Integer.toString(offset));
 
             b.statement("this.continuationsIndex += CONTINUATION_LENGTH");
 
@@ -7017,10 +7035,11 @@ final class BuilderElement extends AbstractElement {
                         }
                     } else {
                         fields.addAll(getConstants(operation.constantOperands.before(), true));
-                        int bciFields = operation.numDynamicOperands();
                         if (model.usesBoxingElimination()) {
-                            for (int i = 0; i < bciFields; i++) {
-                                fields.add(getChildBci(i, true));
+                            for (Operand operand : operation.instruction.signature.dynamicOperands()) {
+                                if (operation.instruction.needsChildBciForBoxingElimination(model, operand)) {
+                                    fields.add(getChildBci(operand.dynamicIndex(), true));
+                                }
                             }
                         }
                         if (operation.isVariadic) {
@@ -7056,7 +7075,7 @@ final class BuilderElement extends AbstractElement {
             // ensure child bcis created
             if (create) {
                 for (int i = childBcis.size(); i < childIndex + 1; i++) {
-                    childBcis.add(field(type(int.class), "child" + i + "Bci").withInitializer(UNINIT));
+                    childBcis.add(field(type(int.class), getChildBciName(i)).withInitializer(UNINIT));
                 }
             }
             return childBcis.get(childIndex);

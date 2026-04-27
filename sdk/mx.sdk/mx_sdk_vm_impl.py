@@ -2028,9 +2028,12 @@ class GraalVmBashLauncherBuildTask(GraalVmNativeImageBuildTask):
             return ' '.join(image_config.option_vars)
 
         def _get_launcher_args():
+            launcher_args = []
             if not _jlink_libraries():
-                return '-J--add-exports=jdk.internal.vm.ci/jdk.vm.ci.code=jdk.graal.compiler'
-            return ''
+                launcher_args.append('-J--add-exports=jdk.internal.vm.ci/jdk.vm.ci.code=jdk.graal.compiler')
+            if self.subject.native_image_config.main_module == 'org.graalvm.nativeimage.driver':
+                launcher_args.append('-J--add-exports=jdk.internal.vm.ci/jdk.vm.ci.meta=org.graalvm.nativeimage.foreign')
+            return ' '.join(launcher_args)
 
         def _get_add_exports():
             return ' '.join(self.subject.native_image_config.get_add_exports(_known_missing_jars))
@@ -2560,8 +2563,9 @@ class NativeLibraryLauncherProject(mx_native.DefaultNativeProject):
         if len(self.language_library_config.option_vars) > 0:
             _dynamic_cflags += ['-DLAUNCHER_OPTION_VARS="{\\"' + '\\", \\"'.join(self.language_library_config.option_vars) + '\\"}"']
 
-        if len(self.language_library_config.default_vm_args) > 0:
-            _dynamic_cflags += ['-DLAUNCHER_DEFAULT_VM_ARGS="{\\"' + '\\", \\"'.join(self.language_library_config.default_vm_args) + '\\"}"']
+        default_vm_args = [arg for arg in [mx_subst.string_substitutions.substitute(arg) for arg in self.language_library_config.default_vm_args] if arg]
+        if len(default_vm_args) > 0:
+            _dynamic_cflags += ['-DLAUNCHER_DEFAULT_VM_ARGS="{\\"' + '\\", \\"'.join(default_vm_args) + '\\"}"']
 
         return super().cflags + _dynamic_cflags
 

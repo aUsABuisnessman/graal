@@ -1,6 +1,5 @@
 /*
- * Copyright (c) 2023, 2023, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2023, 2023, Alibaba Group Holding Limited. All rights reserved.
+ * Copyright (c) 2026, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,32 +22,24 @@
  * or visit www.oracle.com if you need additional information or have any
  * questions.
  */
+package com.oracle.svm.test.logger;
 
-package com.oracle.graal.pointsto.standalone.test;
+import org.junit.Test;
 
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
+import com.oracle.svm.test.NativeImageBuildArgs;
 
-public class StandaloneConstantScanDynamicCase {
-    private static final VarHandle STATUS;
-
-    static {
-        try {
-            MethodHandles.Lookup l = MethodHandles.lookup();
-            STATUS = l.findVarHandle(StandaloneConstantScanDynamicTest.class, "status", int.class);
-        } catch (ReflectiveOperationException e) {
-            throw new ExceptionInInitializerError(e);
-        }
+@NativeImageBuildArgs({
+                "-H:+UnlockExperimentalVMOptions",
+                "-H:+EnableLoggingFeature"
+})
+public class PlatformLoggerReconstructionTest extends AbstractPlatformLoggerReconstructionTest {
+    @Test
+    public void testBuildTimePlatformLoggerPreservedInRuntimeCache() {
+        assertBuildTimePlatformLoggerPreservedInRuntimeCache(true);
     }
 
-    private int status;
-
-    public static void main(String[] args) {
-        StandaloneConstantScanDynamicCase t = new StandaloneConstantScanDynamicCase();
-        t.run();
-    }
-
-    public void run() {
-        STATUS.compareAndSet(this, status, 1);
+    @Test
+    public void testReachableButUncachedBuildTimePlatformLoggerIsNotInsertedIntoRuntimeCache() {
+        assertReachableButUncachedBuildTimePlatformLoggerNotInsertedIntoRuntimeCache();
     }
 }
