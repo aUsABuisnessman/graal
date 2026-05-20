@@ -183,20 +183,8 @@ public abstract class HotSpotBackend extends Backend implements FrameMap.Referen
 
     public static final LocationIdentity CRC_TABLE_LOCATION = NamedLocationIdentity.immutable("crc32_table");
 
-    public static final HotSpotForeignCallDescriptor UPDATE_BYTES_CRC32 = new HotSpotForeignCallDescriptor(LEAF, HAS_SIDE_EFFECT, any(), "updateBytesCRC32", int.class, int.class,
-                    WordBase.class, int.class);
-
-    public static final HotSpotForeignCallDescriptor UPDATE_BYTES_CRC32C = new HotSpotForeignCallDescriptor(LEAF, HAS_SIDE_EFFECT, any(), "updateBytesCRC32C", int.class, int.class,
-                    WordBase.class, int.class);
-
     public static final HotSpotForeignCallDescriptor UPDATE_BYTES_ADLER32 = new HotSpotForeignCallDescriptor(LEAF, HAS_SIDE_EFFECT, any(), "updateBytesAdler32", int.class, int.class,
                     WordBase.class, int.class);
-
-    public static final HotSpotForeignCallDescriptor BIGINTEGER_LEFT_SHIFT_WORKER = new HotSpotForeignCallDescriptor(LEAF, HAS_SIDE_EFFECT, any(), "bigIntegerLeftShiftWorker", void.class,
-                    WordBase.class, WordBase.class, int.class, int.class, int.class);
-
-    public static final HotSpotForeignCallDescriptor BIGINTEGER_RIGHT_SHIFT_WORKER = new HotSpotForeignCallDescriptor(LEAF, HAS_SIDE_EFFECT, any(), "bigIntegerRightShiftWorker", void.class,
-                    WordBase.class, WordBase.class, int.class, int.class, int.class);
 
     public static final HotSpotForeignCallDescriptor GALOIS_COUNTER_MODE_CRYPT = new HotSpotForeignCallDescriptor(LEAF, HAS_SIDE_EFFECT, any(), "_galoisCounterMode_AESCrypt", int.class,
                     WordBase.class, int.class, WordBase.class, WordBase.class, WordBase.class, WordBase.class, WordBase.class, WordBase.class);
@@ -362,8 +350,10 @@ public abstract class HotSpotBackend extends Backend implements FrameMap.Referen
                     save = null;
                     preservedRegisters.clear();
                 } else {
-                    op.visitEachTemp(defConsumer);
-                    op.visitEachOutput(defConsumer);
+                    // Preserved-register tracking only marks kill-side operand buckets, and their
+                    // relative order is irrelevant here, so it uses the canonical forward operand
+                    // walk.
+                    op.visitEachValueForward(null, null, defConsumer, defConsumer, defConsumer);
                 }
             }
             assert save == null : "missing RestoreRegistersOp";

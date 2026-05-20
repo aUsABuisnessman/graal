@@ -50,8 +50,10 @@ import jdk.graal.compiler.replacements.nodes.ArrayEqualsForeignCalls;
 import jdk.graal.compiler.replacements.nodes.ArrayEqualsWithMaskForeignCalls;
 import jdk.graal.compiler.replacements.nodes.ArrayIndexOfForeignCalls;
 import jdk.graal.compiler.replacements.nodes.ArrayRegionCompareToForeignCalls;
+import jdk.graal.compiler.replacements.nodes.BigIntegerLeftShiftWorkerNode;
 import jdk.graal.compiler.replacements.nodes.BigIntegerMulAddNode;
 import jdk.graal.compiler.replacements.nodes.BigIntegerMultiplyToLenNode;
+import jdk.graal.compiler.replacements.nodes.BigIntegerRightShiftWorkerNode;
 import jdk.graal.compiler.replacements.nodes.BigIntegerSquareToLenNode;
 import jdk.graal.compiler.replacements.nodes.Base64DecodeBlockNode;
 import jdk.graal.compiler.replacements.nodes.Base64EncodeBlockNode;
@@ -59,6 +61,8 @@ import jdk.graal.compiler.replacements.nodes.CalcStringAttributesForeignCalls;
 import jdk.graal.compiler.replacements.nodes.CalcStringAttributesNode;
 import jdk.graal.compiler.replacements.nodes.CipherBlockChainingAESNode;
 import jdk.graal.compiler.replacements.nodes.CountPositivesNode;
+import jdk.graal.compiler.replacements.nodes.CRC32CUpdateBytesNode;
+import jdk.graal.compiler.replacements.nodes.CRC32UpdateBytesNode;
 import jdk.graal.compiler.replacements.nodes.CounterModeAESNode;
 import jdk.graal.compiler.replacements.nodes.ElectronicCodeBookAESNode;
 import jdk.graal.compiler.replacements.nodes.EncodeArrayNode;
@@ -107,8 +111,12 @@ public class AMD64StubForeignCallsFeature extends StubForeignCallsFeatureBase {
                         new StubDescriptor(CipherBlockChainingAESNode.STUBS, CipherBlockChainingAESNode.minFeaturesAMD64(), CipherBlockChainingAESNode.minFeaturesAMD64()),
                         new StubDescriptor(ElectronicCodeBookAESNode.STUBS, ElectronicCodeBookAESNode.minFeaturesAMD64(), ElectronicCodeBookAESNode.minFeaturesAMD64()),
                         new StubDescriptor(GHASHProcessBlocksNode.STUB, GHASHProcessBlocksNode.minFeaturesAMD64(), GHASH_CPU_FEATURES_AMD64),
-                        new StubDescriptor(BigIntegerMultiplyToLenNode.STUB, BASELINE, BIGINTEGER_MULTIPLY_TO_LEN_CPU_FEATURES_AMD64),
+                        new StubDescriptor(CRC32UpdateBytesNode.STUB, CRC32UpdateBytesNode.minFeaturesAMD64(), CRC32UpdateBytesNode.maxFeaturesAMD64()),
+                        new StubDescriptor(CRC32CUpdateBytesNode.STUB, CRC32CUpdateBytesNode.minFeaturesAMD64(), CRC32CUpdateBytesNode.maxFeaturesAMD64()),
+                        new StubDescriptor(BigIntegerLeftShiftWorkerNode.STUB, BigIntegerLeftShiftWorkerNode.minFeaturesAMD64(), BigIntegerLeftShiftWorkerNode.minFeaturesAMD64()),
                         new StubDescriptor(BigIntegerMulAddNode.STUB, BASELINE, BIGINTEGER_MUL_ADD_CPU_FEATURES_AMD64),
+                        new StubDescriptor(BigIntegerMultiplyToLenNode.STUB, BASELINE, BIGINTEGER_MULTIPLY_TO_LEN_CPU_FEATURES_AMD64),
+                        new StubDescriptor(BigIntegerRightShiftWorkerNode.STUB, BigIntegerRightShiftWorkerNode.minFeaturesAMD64(), BigIntegerRightShiftWorkerNode.minFeaturesAMD64()),
                         new StubDescriptor(BigIntegerSquareToLenNode.STUB, BASELINE, BIGINTEGER_MUL_ADD_CPU_FEATURES_AMD64),
                         new StubDescriptor(SHA1Node.STUB, SHA1Node.minFeaturesAMD64(), SHA1Node.minFeaturesAMD64()),
                         new StubDescriptor(SHA256Node.STUB, SHA256Node.minFeaturesAMD64(), SHA256Node.minFeaturesAMD64()),
