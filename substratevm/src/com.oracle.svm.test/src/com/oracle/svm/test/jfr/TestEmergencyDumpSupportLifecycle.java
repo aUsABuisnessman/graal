@@ -37,7 +37,7 @@ import com.oracle.svm.core.posix.jfr.PosixJfrEmergencyDumpSupport;
 public class TestEmergencyDumpSupportLifecycle extends AbstractJfrTest {
     @Test
     public void testRepeatedInitializeReusesPathBuffer() {
-        if (!HasJfrSupport.get()) {
+        if (!HasJfrSupport.get() || !JfrEmergencyDumpSupport.isPresent()) {
             return;
         }
         if (!(JfrEmergencyDumpSupport.singleton() instanceof PosixJfrEmergencyDumpSupport support)) {

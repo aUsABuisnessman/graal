@@ -58,7 +58,7 @@ suite = {
             },
             {
                 "name": "graalpython",
-                "version": "3081007be86bbe3e26db362441d0439decc9df0c",
+                "version": "801748233e56a58112e0b4d0a537529b9131788d",
                 "dynamic": True,
                 "urls": [
                     {"url": "https://github.com/graalvm/graalpython.git", "kind": "git"},
@@ -66,7 +66,7 @@ suite = {
             },
             {
                 "name": "polybenchmarks",
-                "version": "a04259d72ab94b6245d3ce775833c8e8a3af42fa",
+                "version": "692ba4ccdb4ca317525ea342940cf96c45806c6e",
                 "dynamic": True,
                 "urls": [
                     {"url": "https://github.com/graalvm/polybenchmarks.git", "kind": "git"},

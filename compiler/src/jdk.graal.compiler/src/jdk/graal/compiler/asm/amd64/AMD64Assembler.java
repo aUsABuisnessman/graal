@@ -86,9 +86,13 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
         // @formatter:on
     }
 
+    private static final int[] LFENCE_BYTES = {0x0F, 0xAE, 0xE8};
+    private static final int LOCK_PREFIX_BYTE = 0xF0;
+
     private final boolean useBranchesWithin32ByteBoundary;
     private int jccErratumMitigationDisabled;
     private boolean optimizeLongJumps;
+    private int lastLockPosition = Integer.MIN_VALUE;
     /**
      * The encoding to use when emitting AVX instructions. Not used if the target doesn't support
      * any version of AVX.
@@ -603,28 +607,31 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
      */
     public static class AMD64MROp extends AMD64RROp {
         // @formatter:off
-        public static final AMD64MROp MOVB     = new AMD64MROp("MOVB",           0x88, OpAssertion.ByteAssertion);
-        public static final AMD64MROp MOV      = new AMD64MROp("MOV",            0x89, OpAssertion.WordOrLargerAssertion);
-        public static final AMD64MROp SHLD     = new AMD64MROp("SHLD",     P_0F, 0xA5, OpAssertion.WordOrLargerAssertion);
-        public static final AMD64MROp SHRD     = new AMD64MROp("SHRD",     P_0F, 0xAD, OpAssertion.WordOrLargerAssertion);
-        public static final AMD64MROp TEST     = new AMD64MROp("TEST",           0x85, OpAssertion.WordOrLargerAssertion);
-        public static final AMD64MROp CMPXCHGB = new AMD64MROp("CMPXCHGB", P_0F, 0xB0, OpAssertion.ByteAssertion);
-        public static final AMD64MROp CMPXCHG  = new AMD64MROp("CMPXCHG",  P_0F, 0xB1, OpAssertion.WordOrLargerAssertion);
+        public static final AMD64MROp MOVB     = new AMD64MROp("MOVB",           0x88, false, OpAssertion.ByteAssertion);
+        public static final AMD64MROp MOV      = new AMD64MROp("MOV",            0x89, false, OpAssertion.WordOrLargerAssertion);
+        public static final AMD64MROp SHLD     = new AMD64MROp("SHLD",     P_0F, 0xA5, true,  OpAssertion.WordOrLargerAssertion);
+        public static final AMD64MROp SHRD     = new AMD64MROp("SHRD",     P_0F, 0xAD, true,  OpAssertion.WordOrLargerAssertion);
+        public static final AMD64MROp TEST     = new AMD64MROp("TEST",           0x85, true,  OpAssertion.WordOrLargerAssertion);
+        public static final AMD64MROp CMPXCHGB = new AMD64MROp("CMPXCHGB", P_0F, 0xB0, true,  OpAssertion.ByteAssertion);
+        public static final AMD64MROp CMPXCHG  = new AMD64MROp("CMPXCHG",  P_0F, 0xB1, true,  OpAssertion.WordOrLargerAssertion);
 
-        public static final AMD64MROp XADDB    = new AMD64MROp("XADDB",    P_0F, 0xC0, OpAssertion.ByteAssertion);
-        public static final AMD64MROp XADD     = new AMD64MROp("XADD",     P_0F, 0xC1, OpAssertion.WordOrLargerAssertion);
+        public static final AMD64MROp XADDB    = new AMD64MROp("XADDB",    P_0F, 0xC0, true,  OpAssertion.ByteAssertion);
+        public static final AMD64MROp XADD     = new AMD64MROp("XADD",     P_0F, 0xC1, true,  OpAssertion.WordOrLargerAssertion);
         // @formatter:on
 
-        protected AMD64MROp(String opcode, int op, OpAssertion assertion) {
-            this(opcode, 0, 0, op, assertion, null);
+        private final boolean isMemRead;
+
+        protected AMD64MROp(String opcode, int op, boolean isMemRead, OpAssertion assertion) {
+            this(opcode, 0, 0, op, isMemRead, assertion, null);
         }
 
-        protected AMD64MROp(String opcode, int prefix, int op, OpAssertion assertion) {
-            this(opcode, 0, prefix, op, assertion, null);
+        protected AMD64MROp(String opcode, int prefix, int op, boolean isMemRead, OpAssertion assertion) {
+            this(opcode, 0, prefix, op, isMemRead, assertion, null);
         }
 
-        protected AMD64MROp(String opcode, int prefix1, int prefix2, int op, OpAssertion assertion, CPUFeature feature) {
+        protected AMD64MROp(String opcode, int prefix1, int prefix2, int op, boolean isMemRead, OpAssertion assertion, CPUFeature feature) {
             super(opcode, prefix1, prefix2, op, assertion, feature);
+            this.isMemRead = isMemRead;
         }
 
         @Override
@@ -638,8 +645,15 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
         public void emit(AMD64Assembler asm, OperandSize size, AMD64Address dst, Register src) {
             assert verify(asm, size, src, null);
             assert !isSSEInstruction();
+            if (isMemRead) {
+                asm.interceptMemorySrcOperands(dst);
+            }
             emitOpcode(asm, size, getRXB(src, dst), src.encoding, 0);
             asm.emitOperandHelper(src, dst, 0);
+        }
+
+        public boolean isMemRead() {
+            return isMemRead;
         }
     }
 
@@ -648,41 +662,43 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
      */
     public static final class AMD64MOp extends AMD64Op {
         // @formatter:off
-        public static final AMD64MOp DEC  = new AMD64MOp("DEC",  0xFF, 1);
-        public static final AMD64MOp DECB = new AMD64MOp("DEC",  0xFE, 1, OpAssertion.ByteAssertion);
-        public static final AMD64MOp DIV  = new AMD64MOp("DIV",  0xF7, 6);
-        public static final AMD64MOp IDIV = new AMD64MOp("IDIV", 0xF7, 7);
-        public static final AMD64MOp IMUL = new AMD64MOp("IMUL", 0xF7, 5);
-        public static final AMD64MOp INC  = new AMD64MOp("INC",  0xFF, 0);
-        public static final AMD64MOp INCB = new AMD64MOp("INC",  0xFE, 0, OpAssertion.ByteAssertion);
-        public static final AMD64MOp MUL  = new AMD64MOp("MUL",  0xF7, 4);
-        public static final AMD64MOp NEG  = new AMD64MOp("NEG",  0xF7, 3);
-        public static final AMD64MOp NEGB = new AMD64MOp("NEG",  0xF6, 3, OpAssertion.ByteAssertion);
-        public static final AMD64MOp NOT  = new AMD64MOp("NOT",  0xF7, 2);
-        public static final AMD64MOp NOTB = new AMD64MOp("NOT",  0xF6, 2, OpAssertion.ByteAssertion);
-        public static final AMD64MOp POP  = new AMD64MOp("POP",  0x8F, 0, OpAssertion.WordOrQwordAssertion);
-        public static final AMD64MOp PUSH = new AMD64MOp("PUSH", 0xFF, 6, OpAssertion.WordOrQwordAssertion);
-        public static final AMD64MOp SAR  = new AMD64MOp("SAR",  0xD3, 7, OpAssertion.WordOrLargerAssertion);
-        public static final AMD64MOp SAR1 = new AMD64MOp("SAR1", 0xD1, 7, OpAssertion.WordOrLargerAssertion);
-        public static final AMD64MOp SHL  = new AMD64MOp("SHL",  0xD3, 4, OpAssertion.WordOrLargerAssertion);
-        public static final AMD64MOp SHL1 = new AMD64MOp("SHL1", 0xD1, 4, OpAssertion.WordOrLargerAssertion);
-        public static final AMD64MOp SHR  = new AMD64MOp("SHR",  0xD3, 5, OpAssertion.WordOrLargerAssertion);
-        public static final AMD64MOp SHR1 = new AMD64MOp("SHR1", 0xD1, 5, OpAssertion.WordOrLargerAssertion);
+        public static final AMD64MOp DEC  = new AMD64MOp("DEC",  0xFF, 1, true);
+        public static final AMD64MOp DECB = new AMD64MOp("DEC",  0xFE, 1, true,  OpAssertion.ByteAssertion);
+        public static final AMD64MOp DIV  = new AMD64MOp("DIV",  0xF7, 6, true);
+        public static final AMD64MOp IDIV = new AMD64MOp("IDIV", 0xF7, 7, true);
+        public static final AMD64MOp IMUL = new AMD64MOp("IMUL", 0xF7, 5, true);
+        public static final AMD64MOp INC  = new AMD64MOp("INC",  0xFF, 0, true);
+        public static final AMD64MOp INCB = new AMD64MOp("INC",  0xFE, 0, true,  OpAssertion.ByteAssertion);
+        public static final AMD64MOp MUL  = new AMD64MOp("MUL",  0xF7, 4, true);
+        public static final AMD64MOp NEG  = new AMD64MOp("NEG",  0xF7, 3, true);
+        public static final AMD64MOp NEGB = new AMD64MOp("NEG",  0xF6, 3, true,  OpAssertion.ByteAssertion);
+        public static final AMD64MOp NOT  = new AMD64MOp("NOT",  0xF7, 2, true);
+        public static final AMD64MOp NOTB = new AMD64MOp("NOT",  0xF6, 2, true,  OpAssertion.ByteAssertion);
+        public static final AMD64MOp POP  = new AMD64MOp("POP",  0x8F, 0, false, OpAssertion.WordOrQwordAssertion);
+        public static final AMD64MOp PUSH = new AMD64MOp("PUSH", 0xFF, 6, true,  OpAssertion.WordOrQwordAssertion);
+        public static final AMD64MOp SAR  = new AMD64MOp("SAR",  0xD3, 7, true,  OpAssertion.WordOrLargerAssertion);
+        public static final AMD64MOp SAR1 = new AMD64MOp("SAR1", 0xD1, 7, true,  OpAssertion.WordOrLargerAssertion);
+        public static final AMD64MOp SHL  = new AMD64MOp("SHL",  0xD3, 4, true,  OpAssertion.WordOrLargerAssertion);
+        public static final AMD64MOp SHL1 = new AMD64MOp("SHL1", 0xD1, 4, true,  OpAssertion.WordOrLargerAssertion);
+        public static final AMD64MOp SHR  = new AMD64MOp("SHR",  0xD3, 5, true,  OpAssertion.WordOrLargerAssertion);
+        public static final AMD64MOp SHR1 = new AMD64MOp("SHR1", 0xD1, 5, true,  OpAssertion.WordOrLargerAssertion);
         // @formatter:on
 
         private final int ext;
+        private final boolean isMemRead;
 
-        protected AMD64MOp(String opcode, int op, int ext) {
-            this(opcode, 0, op, ext, OpAssertion.WordOrLargerAssertion);
+        protected AMD64MOp(String opcode, int op, int ext, boolean isMemRead) {
+            this(opcode, 0, op, ext, isMemRead, OpAssertion.WordOrLargerAssertion);
         }
 
-        protected AMD64MOp(String opcode, int op, int ext, OpAssertion assertion) {
-            this(opcode, 0, op, ext, assertion);
+        protected AMD64MOp(String opcode, int op, int ext, boolean isMemRead, OpAssertion assertion) {
+            this(opcode, 0, op, ext, isMemRead, assertion);
         }
 
-        protected AMD64MOp(String opcode, int prefix, int op, int ext, OpAssertion assertion) {
+        protected AMD64MOp(String opcode, int prefix, int op, int ext, boolean isMemRead, OpAssertion assertion) {
             super(opcode, 0, prefix, op, assertion, null);
             this.ext = ext;
+            this.isMemRead = isMemRead;
         }
 
         public void emit(AMD64Assembler asm, OperandSize size, Register dst) {
@@ -693,8 +709,15 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
 
         public void emit(AMD64Assembler asm, OperandSize size, AMD64Address dst) {
             assert verify(asm, size, null, null);
+            if (isMemRead) {
+                asm.interceptMemorySrcOperands(dst);
+            }
             emitOpcode(asm, size, getRXB(null, dst), 0, 0);
             asm.emitOperandHelper(ext, dst, 0);
+        }
+
+        public boolean isMemRead() {
+            return isMemRead;
         }
     }
 
@@ -968,6 +991,7 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
         public static final SSEOp MOVDDUP   = new SSEOp("MOVDDUP",         P_0F, 0x12, PreferredNDS.NONE,  OpAssertion.DoubleAssertion, CPUFeature.SSE3);
         public static final SSEOp MOVDQA    = new SSEOp("MOVDQA",          P_0F, 0x6F, PreferredNDS.NONE,  OpAssertion.PackedDoubleAssertion);
         public static final SSEOp MOVDQU    = new SSEOp("MOVDQU",          P_0F, 0x6F, PreferredNDS.NONE,  OpAssertion.SingleAssertion);
+        public static final SSEOp MOVUPS    = new SSEOp("MOVUPS",          P_0F, 0x10, PreferredNDS.NONE,  OpAssertion.PackedFloatAssertion);
 
         public static final SSEOp UNPCKHPD  = new SSEOp("UNPCKHPD",        P_0F, 0x15, PreferredNDS.DST,   OpAssertion.PackedDoubleAssertion);
         public static final SSEOp UNPCKLPD  = new SSEOp("UNPCKLPD",        P_0F, 0x14, PreferredNDS.DST,   OpAssertion.PackedDoubleAssertion);
@@ -1077,6 +1101,7 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
         public static final SSERMIOp PSHUFLW       = new SSERMIOp("PSHUFLW",       true, P_0F,         0x70, PreferredNDS.NONE,  OpAssertion.DoubleAssertion, CPUFeature.SSE2);
         // PEXTRW with a GPR destination, one byte shorter encoding than SSEMRIOp.PEXTRW.
         public static final SSERMIOp PEXTRW_GPR    = new SSERMIOp("PEXTRW_GPR",    true, P_0F,   false, 0xC5, PreferredNDS.NONE,  OpAssertion.PackedDoubleFloatToIntAssertion, CPUFeature.SSE2);
+        public static final SSERMIOp SHUFPD        = new SSERMIOp("SHUFPD",        true, P_0F,         0xC6, PreferredNDS.DST,   OpAssertion.PackedDoubleAssertion, CPUFeature.SSE2);
         // @formatter:on
 
         private final PreferredNDS preferredNDS;
@@ -1127,8 +1152,10 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
         public static final SSEMROp MOVSS  = new SSEMROp("MOVSS",               P_0F, 0x11, PreferredNDS.SRC,  OpAssertion.SingleAssertion);
         public static final SSEMROp MOVSD  = new SSEMROp("MOVSD",               P_0F, 0x11, PreferredNDS.SRC,  OpAssertion.DoubleAssertion);
 
+        public static final SSEMROp MOVAPS = new SSEMROp("MOVAPS",              P_0F, 0x29, PreferredNDS.NONE, OpAssertion.PackedFloatAssertion);
         public static final SSEMROp MOVDQU = new SSEMROp("MOVDQU",              P_0F, 0x7F, PreferredNDS.NONE, OpAssertion.SingleAssertion);
         public static final SSEMROp MOVUPD = new SSEMROp("MOVUPD", 0x66, P_0F, 0x11, PreferredNDS.NONE, OpAssertion.PackedDoubleAssertion);
+        public static final SSEMROp MOVUPS = new SSEMROp("MOVUPS",              P_0F, 0x11, PreferredNDS.NONE, OpAssertion.PackedFloatAssertion);
         // @formatter:on
 
         private final PreferredNDS preferredNDS;
@@ -1138,7 +1165,7 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
         }
 
         protected SSEMROp(String opcode, int prefix1, int prefix2, int op, PreferredNDS preferredNDS, OpAssertion assertion) {
-            super(opcode, prefix1, prefix2, op, assertion, CPUFeature.SSE2);
+            super(opcode, prefix1, prefix2, op, false, assertion, CPUFeature.SSE2);
             this.preferredNDS = preferredNDS;
         }
 
@@ -1226,13 +1253,13 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
         private AMD64BinaryArithmetic(String opcode, int code) {
             int baseOp = code << 3;
 
-            byteImmOp = new AMD64MIOp(opcode, true, 0, 0x80, code, false, OpAssertion.ByteAssertion);
-            byteMrOp = new AMD64MROp(opcode, 0, baseOp, OpAssertion.ByteAssertion);
+            byteImmOp = new AMD64MIOp(opcode, true, 0, 0x80, code, true, OpAssertion.ByteAssertion);
+            byteMrOp = new AMD64MROp(opcode, 0, baseOp, true, OpAssertion.ByteAssertion);
             byteRmOp = new AMD64RMOp(opcode, 0, baseOp | 0x02, OpAssertion.ByteAssertion);
 
-            immOp = new AMD64MIOp(opcode, false, 0, 0x81, code, false, OpAssertion.WordOrLargerAssertion);
-            immSxOp = new AMD64MIOp(opcode, true, 0, 0x83, code, false, OpAssertion.WordOrLargerAssertion);
-            mrOp = new AMD64MROp(opcode, 0, baseOp | 0x01, OpAssertion.WordOrLargerAssertion);
+            immOp = new AMD64MIOp(opcode, false, 0, 0x81, code, true, OpAssertion.WordOrLargerAssertion);
+            immSxOp = new AMD64MIOp(opcode, true, 0, 0x83, code, true, OpAssertion.WordOrLargerAssertion);
+            mrOp = new AMD64MROp(opcode, 0, baseOp | 0x01, true, OpAssertion.WordOrLargerAssertion);
             rmOp = new AMD64RMOp(opcode, 0, baseOp | 0x03, OpAssertion.WordOrLargerAssertion);
         }
 
@@ -1282,8 +1309,8 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
         public final AMD64MIOp miOp;
 
         private AMD64Shift(String opcode, int code) {
-            m1Op = new AMD64MOp(opcode, 0, 0xD1, code, OpAssertion.WordOrLargerAssertion);
-            mcOp = new AMD64MOp(opcode, 0, 0xD3, code, OpAssertion.WordOrLargerAssertion);
+            m1Op = new AMD64MOp(opcode, 0, 0xD1, code, true, OpAssertion.WordOrLargerAssertion);
+            mcOp = new AMD64MOp(opcode, 0, 0xD3, code, true, OpAssertion.WordOrLargerAssertion);
             miOp = new AMD64MIOp(opcode, true, 0, 0xC1, code, true, OpAssertion.WordOrLargerAssertion);
         }
     }
@@ -4243,6 +4270,7 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
             }
         }
         super.reset();
+        lastLockPosition = Integer.MIN_VALUE;
         nextJumpIdx = 0;
         jumpInfo = new ArrayList<>();
     }
@@ -4637,13 +4665,38 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
     }
 
     public void lfence() {
-        emitByte(0x0f);
-        emitByte(0xae);
-        emitByte(0xe8);
+        for (int lfenceByte : LFENCE_BYTES) {
+            emitByte(lfenceByte);
+        }
+    }
+
+    /**
+     * Emits an {@code LFENCE} for a memory-source operand while preserving the required
+     * {@code LFENCE; LOCK; op} byte order for locked instructions.
+     * <p>
+     * Locked instruction encoders emit the optional {@link #lock()} prefix before they reach the
+     * memory operand and run source-address interception. If the prefix is the immediately
+     * preceding byte, this method rewrites that byte into {@code LFENCE} and re-emits the
+     * {@code LOCK} prefix. Otherwise it emits a normal {@code LFENCE} at the current position.
+     */
+    protected final void lfenceBeforeLock() {
+        int pos = position();
+        if (lastLockPosition == pos - 1) {
+            int lockPos = pos - 1;
+            GraalError.guarantee(getByte(lockPos) == LOCK_PREFIX_BYTE, "expected lock prefix at position %d", lockPos);
+            emitByte(LFENCE_BYTES[0], lockPos);
+            for (int i = 1; i < LFENCE_BYTES.length; i++) {
+                emitByte(LFENCE_BYTES[i]);
+            }
+            lock();
+        } else {
+            lfence();
+        }
     }
 
     public void lock() {
-        emitByte(0xF0);
+        lastLockPosition = position();
+        emitByte(LOCK_PREFIX_BYTE);
     }
 
     public final void membar(int barriers) {
@@ -5324,6 +5377,10 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
         simdMoveOp(SSEOp.MOVAPS, OperandSize.PS, VexMoveOp.VMOVAPS, AVXSize.XMM, dst, src);
     }
 
+    public final void movaps(AMD64Address dst, Register src) {
+        simdMoveOp(SSEMROp.MOVAPS, OperandSize.PS, VexMoveOp.VMOVAPS, AVXSize.XMM, dst, src);
+    }
+
     public final void movb(Register dst, AMD64Address src) {
         AMD64RMOp.MOVB.emit(this, OperandSize.BYTE, dst, src);
     }
@@ -5370,6 +5427,10 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
         } else {
             throw new InternalError("should not reach here");
         }
+    }
+
+    public final void movdqa(Register dst, AMD64Address src) {
+        simdMoveOp(SSEOp.MOVDQA, OperandSize.PD, VexMoveOp.VMOVDQA64, AVXSize.XMM, dst, src);
     }
 
     public final void movdqa(Register dst, Register src) {
@@ -5477,6 +5538,10 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
 
     public final void movswq(Register dst, AMD64Address src) {
         AMD64RMOp.MOVSX.emit(this, OperandSize.QWORD, dst, src);
+    }
+
+    public final void movups(AMD64Address dst, Register src) {
+        simdMoveOp(SSEMROp.MOVUPS, OperandSize.PS, VexMoveOp.VMOVUPS, AVXSize.XMM, dst, src);
     }
 
     public final void movw(AMD64Address dst, int imm16) {
@@ -6104,7 +6169,11 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
 
     public final void shrl(Register dst, int imm8) {
         GraalError.guarantee(isShiftCount(imm8 >> 1), "illegal shift count");
-        AMD64MIOp.SHR.emit(this, OperandSize.DWORD, dst, imm8);
+        if (imm8 == 1) {
+            AMD64MOp.SHR1.emit(this, OperandSize.DWORD, dst);
+        } else {
+            AMD64MIOp.SHR.emit(this, OperandSize.DWORD, dst, imm8);
+        }
     }
 
     public final void shrq(Register dst, int imm8) {
@@ -6119,6 +6188,11 @@ public class AMD64Assembler extends AMD64BaseAssembler implements MemoryReadInte
     public final void shrq(Register dst) {
         // Unsigned divide dst by 2, CL times.
         AMD64MOp.SHR.emit(this, OperandSize.QWORD, dst);
+    }
+
+    public final void shufpd(Register dst, Register src, int imm8) {
+        GraalError.guarantee(isUByte(imm8), "invalid value");
+        simdOp(SSERMIOp.SHUFPD, OperandSize.PD, VexRVMIOp.VSHUFPD, AVXSize.XMM, dst, src, imm8);
     }
 
     public final void sqrtsd(Register dst, Register src) {
