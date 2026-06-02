@@ -1342,6 +1342,8 @@ public abstract class Accessor {
 
         public abstract void onEnginePatch(Object runtimeData, OptionValues runtimeOptions, Function<String, TruffleLogger> logSupplier, SandboxPolicy sandboxPolicy);
 
+        public abstract void onEnginePatchSuccess(Object runtimeData);
+
         public abstract boolean onEngineClosing(Object runtimeData);
 
         public abstract boolean onStoreCache(Object runtimeData, Path targetPath, long cancelledWord);
@@ -1369,8 +1371,6 @@ public abstract class Accessor {
         public abstract boolean isLegacyCompilerOption(String key);
 
         public abstract <T> ThreadLocal<T> createTerminatingThreadLocal(Supplier<T> initialValue, Consumer<T> onThreadTermination);
-
-        public abstract void setInitializedTimestamp(CallTarget target, long timestamp);
 
         public abstract void initializeInterpreterCallStackHeadRoom(Object engineData, long interpreterCallStackHeadRoom);
 
@@ -1590,9 +1590,15 @@ public abstract class Accessor {
             super(IMPL_CLASS_NAME);
         }
 
+        public abstract boolean isSupported();
+
         public abstract boolean isIsolateGuest();
 
         public abstract boolean isIsolateHost();
+
+        public abstract boolean hasIsolateLibraryForLanguages(Set<String> languageIds);
+
+        public abstract Collection<Set<String>> getAvailableIsolatedLanguages();
 
         public abstract Engine buildIsolatedEngine(AbstractPolyglotImpl polyglot, Engine localEngine, String[] isolateLanguages, String[] permittedLanguages, SandboxPolicy sandboxPolicy,
                         OutputStream out, OutputStream err, InputStream in, Map<String, String> options, Map<String, String> systemPropertiesOptions, boolean useSystemProperties,

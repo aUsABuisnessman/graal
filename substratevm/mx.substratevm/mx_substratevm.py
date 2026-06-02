@@ -445,7 +445,9 @@ def truffle_unittest_task(extra_build_args=None):
             # GR-44492
             'jdk.graal.compiler.truffle.test.ContextLookupCompilationTest',
             # Verify that native-image folds ConstantOptionKey#getConstantValue
-            'jdk.graal.compiler.truffle.test.ConstantOptionKeyPartialEvaluationTest'
+            'jdk.graal.compiler.truffle.test.ConstantOptionKeyPartialEvaluationTest',
+            # GR-75881
+            'jdk.graal.compiler.truffle.test.GR75881Test',
         ]
         test_build_args = (extra_build_args +
                            svm_experimental_options(['-H:-SupportCompileInIsolates']) +
@@ -2233,6 +2235,7 @@ lib_jvm_preserved_packages = [
     'jdk.internal.logger',
     'jdk.internal.misc',
     'sun.invoke.util',
+    'sun.nio.cs.ext',
     'sun.security.util',
 ]
 
@@ -2241,6 +2244,7 @@ lib_jvm_preserved_modules = [
     'java.prefs',
     'java.xml',
     'java.xml.crypto',
+    'jdk.charsets',
 ]
 
 # Keep libjvm -H:Preserve selectors with the image builder metadata instead of
