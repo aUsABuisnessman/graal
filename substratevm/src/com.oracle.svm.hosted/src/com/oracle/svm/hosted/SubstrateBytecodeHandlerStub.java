@@ -27,7 +27,7 @@ package com.oracle.svm.hosted;
 import static com.oracle.svm.core.deopt.Deoptimizer.StubType.NoDeoptStub;
 import static com.oracle.svm.core.graal.code.SubstrateCallingConventionType.SubstrateCallingConventionArgumentKind.IMMUTABLE;
 import static com.oracle.svm.core.graal.code.SubstrateCallingConventionType.SubstrateCallingConventionArgumentKind.VALUE_REFERENCE;
-import static com.oracle.svm.util.AnnotationUtil.newAnnotationValue;
+import static com.oracle.svm.util.GuestAnnotationAccess.newAnnotationValue;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -37,7 +37,7 @@ import com.oracle.graal.pointsto.infrastructure.WrappedJavaMethod;
 import com.oracle.graal.pointsto.infrastructure.WrappedJavaType;
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.HostedProviders;
-import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.core.NeverStrengthenGraphWithConstants;
 import com.oracle.svm.core.SkipEpilogueSafepointCheck;
 import com.oracle.svm.core.SkipStackOverflowCheck;
@@ -55,11 +55,14 @@ import com.oracle.svm.core.graal.code.SubstrateRegisterConfigFactory;
 import com.oracle.svm.core.graal.meta.SubstrateRegisterConfig;
 import com.oracle.svm.hosted.code.NonBytecodeMethod;
 import com.oracle.svm.hosted.phases.HostedGraphKit;
+import com.oracle.svm.util.OriginalMethodProvider;
 
 import jdk.graal.compiler.annotation.AnnotationValue;
 import jdk.graal.compiler.api.directives.BytecodeInterpreterDirectives.BytecodeInterpreterHandler;
 import jdk.graal.compiler.debug.DebugContext;
 import jdk.graal.compiler.debug.GraalError;
+import jdk.graal.compiler.nodes.ReturnNode;
+import jdk.graal.compiler.nodes.SafepointNode;
 import jdk.graal.compiler.nodes.StructuredGraph;
 import jdk.graal.compiler.phases.util.BytecodeHandlerConfig;
 import jdk.graal.compiler.phases.util.BytecodeHandlerConfig.ArgumentInfo;
@@ -78,8 +81,10 @@ import jdk.vm.ci.meta.ResolvedJavaType;
  *
  * To minimize the overhead in the prologue and epilogue of the generated code, we inject the
  * {@link SkipStackOverflowCheck} annotation to eliminate the stack overflow check, and the
- * {@link SkipEpilogueSafepointCheck} annotation to eliminate the safepoint check when
- * {@link BytecodeInterpreterHandler#safepoint()} is false.
+ * {@link SkipEpilogueSafepointCheck} annotation to eliminate the return-style safepoint check.
+ * Handlers for which {@link BytecodeInterpreterHandler#safepoint()} is true instead use an explicit
+ * safepoint before returning or tail dispatching so that execution resumes in the stub after the
+ * slow path.
  *
  * We also inject the {@link NeverStrengthenGraphWithConstants} annotation to prevent the compiler
  * from replacing {@link jdk.graal.compiler.nodes.ParameterNode} with constants derived from static
@@ -125,8 +130,38 @@ public final class SubstrateBytecodeHandlerStub extends NonBytecodeMethod implem
             Register fallbackReturnRegister = config.hasCopyFromReturnArgument() ? null : getReturnRegister(getRegisterConfig());
             return BytecodeHandlerStubHelper.createEmptyStub(kit, config, fallbackReturnRegister);
         }
-        return BytecodeHandlerStubHelper.createStub(kit, method, 0, threading, nextOpcodeMethod, () -> stubHolder.getBytecodeHandlers(interpreterHolder, config), config, targetMethod,
+        StructuredGraph graph = BytecodeHandlerStubHelper.createStub(kit, method, 0, threading, nextOpcodeMethod,
+                        () -> stubHolder.getBytecodeHandlers(interpreterHolder, config), config, targetMethod,
                         SubstrateBytecodeHandlerUnwindPath::writeOnCallee);
+        if (needSafepoint) {
+            for (ReturnNode returnNode : graph.getNodes(ReturnNode.TYPE)) {
+                graph.addBeforeFixed(returnNode, graph.add(new SafepointNode()));
+            }
+        }
+        return graph;
+    }
+
+    /**
+     * Returns whether {@code method} is the Java handler invoked by this generated stub. The
+     * target and callee can be represented by different hosted or analysis wrappers, so direct
+     * identity is preferred and comparison of their original Java methods is used as a fallback.
+     * Default stubs have no Java handler target and always return false.
+     */
+    public boolean isTargetMethod(ResolvedJavaMethod method) {
+        if (targetMethod == null) {
+            return false;
+        }
+        if (targetMethod.equals(method)) {
+            return true;
+        }
+        ResolvedJavaMethod originalTargetMethod = OriginalMethodProvider.getOriginalMethod(targetMethod);
+        ResolvedJavaMethod originalMethod = OriginalMethodProvider.getOriginalMethod(method);
+        return originalTargetMethod != null && originalTargetMethod.equals(originalMethod);
+    }
+
+    /** Returns whether this is the fallback stub that returns to the interpreter dispatch loop. */
+    public boolean isDefaultStub() {
+        return isDefault;
     }
 
     /**
@@ -320,16 +355,6 @@ public final class SubstrateBytecodeHandlerStub extends NonBytecodeMethod implem
 
     private static final List<AnnotationValue> INJECTED_ANNOTATIONS = List.of(
                     newAnnotationValue(SkipStackOverflowCheck.class),
-                    newAnnotationValue(NeverStrengthenGraphWithConstants.class),
-                    newAnnotationValue(NeverInline.class,
-                                    "value", "Keep bytecode handler stubs as standalone compilations to ease register pressure in caller and enable tail call threading"),
-                    newAnnotationValue(ExplicitCallingConvention.class,
-                                    "value", SubstrateCallingConventionKind.Custom),
-                    newAnnotationValue(Deoptimizer.DeoptStub.class,
-                                    "stubType", NoDeoptStub));
-
-    private static final List<AnnotationValue> INJECTED_ANNOTATIONS_NO_SAFEPOINT = List.of(
-                    newAnnotationValue(SkipStackOverflowCheck.class),
                     newAnnotationValue(SkipEpilogueSafepointCheck.class),
                     newAnnotationValue(NeverStrengthenGraphWithConstants.class),
                     newAnnotationValue(NeverInline.class,
@@ -341,7 +366,7 @@ public final class SubstrateBytecodeHandlerStub extends NonBytecodeMethod implem
 
     @Override
     public List<AnnotationValue> getInjectedAnnotations() {
-        return needSafepoint ? INJECTED_ANNOTATIONS : INJECTED_ANNOTATIONS_NO_SAFEPOINT;
+        return INJECTED_ANNOTATIONS;
     }
 
     @Override

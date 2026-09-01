@@ -37,13 +37,13 @@ import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.heap.VMOperationInfos;
 import com.oracle.svm.core.jdk.UninterruptibleUtils;
 import com.oracle.svm.core.jfr.oldobject.JfrOldObjectRepository;
 import com.oracle.svm.core.jfr.sampler.JfrExecutionSampler;
 import com.oracle.svm.core.jfr.sampler.JfrRecurringCallbackExecutionSampler;
-import com.oracle.svm.core.jfr.traceid.JfrTraceIdEpoch;
+import com.oracle.svm.core.jfr.traceid.JfrEpoch;
 import com.oracle.svm.core.locks.VMMutex;
 import com.oracle.svm.core.os.RawFileOperationSupport;
 import com.oracle.svm.core.os.RawFileOperationSupport.FileAccessMode;
@@ -56,7 +56,7 @@ import com.oracle.svm.core.thread.RecurringCallbackSupport;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.thread.VMOperationControl;
 import com.oracle.svm.core.thread.VMThreads;
-import com.oracle.svm.core.UnmanagedMemoryUtil;
+import com.oracle.svm.guest.staging.core.UnmanagedMemoryUtil;
 import com.oracle.svm.shared.Uninterruptible;
 
 import jdk.graal.compiler.core.common.NumUtil;
@@ -724,7 +724,7 @@ public final class JfrChunkFileWriter implements JfrChunkWriter {
                 JfrThreadLocal.notifyEventWriter(thread);
             }
 
-            JfrTraceIdEpoch.getInstance().changeEpoch();
+            JfrEpoch.getInstance().changeEpoch();
 
             // Now that the epoch changed, re-register all running threads for the new epoch.
             SubstrateJVM.getThreadRepo().registerRunningThreads();

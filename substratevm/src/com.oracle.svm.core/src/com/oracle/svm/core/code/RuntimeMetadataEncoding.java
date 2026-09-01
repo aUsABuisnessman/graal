@@ -29,9 +29,9 @@ import java.util.Arrays;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 
-import com.oracle.svm.core.BuildPhaseProvider.AfterCompilation;
+import com.oracle.svm.shared.BuildPhaseProvider.AfterCompilation;
 import com.oracle.svm.core.code.RuntimeMetadataDecoderImpl.MetadataAccessorImpl;
-import com.oracle.svm.core.heap.UnknownObjectField;
+import com.oracle.svm.guest.staging.core.heap.UnknownObjectField;
 import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.shared.singletons.LayeredImageSingletonSupport;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;

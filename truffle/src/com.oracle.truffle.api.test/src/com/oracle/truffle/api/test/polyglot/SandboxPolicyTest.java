@@ -784,7 +784,7 @@ public class SandboxPolicyTest {
             assertAtMost(SandboxPolicy.TRUSTED, configuration.sandboxPolicy);
         } catch (IllegalArgumentException iae) {
             if (filterUnsupportedIsolate(configuration, iae)) {
-                assertSandboxPolicyException(iae, "Builder.allowEnvironmentAccess(EnvironmentAccess) is set to INHERIT, but must be set to EnvironmentAccess.NONE.");
+                assertSandboxPolicyException(iae, "Builder.allowEnvironmentAccess(EnvironmentAccess) is set to EnvironmentAccess.INHERIT, but must be set to EnvironmentAccess.NONE.");
                 assertAtLeast(SandboxPolicy.CONSTRAINED, configuration.sandboxPolicy);
             }
         }
@@ -815,6 +815,16 @@ public class SandboxPolicyTest {
             if (filterUnsupportedIsolate(configuration, iae)) {
                 assertSandboxPolicyException(iae,
                                 "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowPublicAccess(boolean) set to true");
+                assertAtLeast(SandboxPolicy.CONSTRAINED, configuration.sandboxPolicy);
+            }
+        }
+        hostAccess = HostAccess.newBuilder().allowPublicAccess(member -> false).build();
+        try (Context context = newContextBuilder(null, ConstrainedLanguage.ID).sandbox(configuration.sandboxPolicy).allowHostAccess(hostAccess).build()) {
+            assertAtMost(SandboxPolicy.TRUSTED, configuration.sandboxPolicy);
+        } catch (IllegalArgumentException iae) {
+            if (filterUnsupportedIsolate(configuration, iae)) {
+                assertSandboxPolicyException(iae,
+                                "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowPublicAccess(Predicate) configured");
                 assertAtLeast(SandboxPolicy.CONSTRAINED, configuration.sandboxPolicy);
             }
         }

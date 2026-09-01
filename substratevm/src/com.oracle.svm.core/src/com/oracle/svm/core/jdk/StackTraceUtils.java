@@ -24,23 +24,26 @@
  */
 package com.oracle.svm.core.jdk;
 
-import static com.oracle.svm.core.snippets.KnownIntrinsics.readCallerStackPointer;
+import static com.oracle.svm.guest.staging.core.graal.KnownIntrinsics.readCallerStackPointer;
 import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
-import java.security.AccessControlContext;
-import java.security.AccessController;
-import java.security.ProtectionDomain;
+import java.lang.invoke.MethodHandle;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 
 import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.code.FrameSourceInfo;
 import com.oracle.svm.core.heap.VMOperationInfos;
 import com.oracle.svm.core.hub.DynamicHub;
+import com.oracle.svm.core.hub.RuntimeClassLoading;
+import com.oracle.svm.core.meta.SharedType;
+import com.oracle.svm.core.reflect.CremaMethodAccessor;
+import com.oracle.svm.core.reflect.SubstrateMethodAccessor;
 import com.oracle.svm.core.stack.JavaStackFrameVisitor;
 import com.oracle.svm.core.stack.JavaStackWalker;
 import com.oracle.svm.core.stack.StackFrameVisitor;
@@ -50,15 +53,16 @@ import com.oracle.svm.core.thread.Target_jdk_internal_vm_Continuation;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.guest.staging.jdk.InternalVMMethod;
 import com.oracle.svm.shared.Uninterruptible;
-import com.oracle.svm.util.AnnotationUtil;
+import com.oracle.svm.shared.util.BasedOnJDKFile;
+import com.oracle.svm.shared.util.SubstrateUtil;
+import com.oracle.svm.util.GuestAnnotationAccess;
 
+import jdk.graal.compiler.core.common.spi.MetaAccessExtensionProvider;
 import jdk.vm.ci.meta.MetaAccessProvider;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
 public class StackTraceUtils {
-
-    private static final Class<?>[] NO_CLASSES = new Class<?>[0];
     private static final StackTraceElement[] NO_ELEMENTS = new StackTraceElement[0];
 
     /**
@@ -115,45 +119,53 @@ public class StackTraceUtils {
         return visitor.trace.toArray(NO_ELEMENTS);
     }
 
-    public static Class<?>[] getClassContext(int skip, Pointer startSP) {
-        GetClassContextVisitor visitor = new GetClassContextVisitor(skip);
-        JavaStackWalker.walkCurrentThread(startSP, visitor);
-        return visitor.trace.toArray(NO_CLASSES);
-    }
-
     /**
-     * Implements the shared semantic of Reflection.getCallerClass and StackWalker.getCallerClass.
+     * Implements the semantic of Reflection.getCallerClass.
      */
-    public static Class<?> getCallerClass(Pointer startSP, boolean showLambdaFrames) {
-        return getCallerClass(startSP, showLambdaFrames, 0, true);
+    public static Class<?> getCallerClass(Pointer startSP) {
+        return getCallerClass(startSP, true);
     }
 
-    public static Class<?> getCallerClass(Pointer startSP, boolean showLambdaFrames, int depth, boolean ignoreFirst) {
-        GetCallerClassVisitor visitor = new GetCallerClassVisitor(showLambdaFrames, depth, ignoreFirst);
+    public static Class<?> getCallerClass(Pointer startSP, boolean ignoreFirst) {
+        GetCallerClassVisitor visitor = new GetCallerClassVisitor(ignoreFirst);
         JavaStackWalker.walkCurrentThread(startSP, visitor);
         return visitor.result;
     }
 
     /**
      * Indicates whether the frame should be displayed in the context of Java backtracing. Returns
-     * true if so, and false otherwise. Backtracing means that there are no lambda or hidden frames
-     * present. To learn more about backtracing, refer to {@link BacktraceDecoder}. For more
-     * fine-grained control over what is displayed, see
-     * {@link #shouldShowFrame(Class, String, boolean, boolean, boolean)}.
+     * true if so, and false otherwise. Backtracing means that there are no hidden frames present.
+     * To learn more about backtracing, refer to {@link BacktraceDecoder}. For more fine-grained
+     * control over what is displayed, see {@link #shouldShowFrame(Class, String, int, boolean)}.
      */
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    public static boolean shouldShowFrame(Class<?> clazz, String method) {
-        return shouldShowFrame(clazz, method, false, true, false);
+    public static boolean shouldShowFrame(Class<?> clazz, String method, int flags) {
+        return shouldShowFrame(clazz, method, flags, false);
     }
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public static boolean shouldShowFrame(FrameSourceInfo frameSourceInfo) {
-        return shouldShowFrame(frameSourceInfo.getSourceClass(), frameSourceInfo.getSourceMethodName());
+        return shouldShowFrame(frameSourceInfo.getSourceClass(), frameSourceInfo.getSourceMethodName(), frameSourceInfo.getSourceMethodFlags());
     }
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    public static boolean shouldShowFrame(FrameSourceInfo frameSourceInfo, boolean showLambdaFrames, boolean showReflectFrames, boolean showHiddenFrames) {
-        return shouldShowFrame(frameSourceInfo.getSourceClass(), frameSourceInfo.getSourceMethodName(), showLambdaFrames, showReflectFrames, showHiddenFrames);
+    public static boolean shouldShowFrame(FrameSourceInfo frameSourceInfo, boolean showHiddenFrames) {
+        return shouldShowFrame(frameSourceInfo.getSourceClass(), frameSourceInfo.getSourceMethodName(), frameSourceInfo.getSourceMethodFlags(), showHiddenFrames);
+    }
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public static boolean shouldShowFrame(Class<?> clazz, String methodName, int flags, boolean showHiddenFrames) {
+        SubstrateUtil.guaranteeRuntimeOnly();
+        if (isVMInternalFrameClass(clazz)) {
+            return false;
+        }
+        if (!showHiddenFrames && FrameSourceInfo.MethodFlags.isHidden(flags)) {
+            return false;
+        }
+        if (clazz == Target_jdk_internal_vm_Continuation.class && (UninterruptibleUtils.String.startsWith(methodName, "enter") || UninterruptibleUtils.String.startsWith(methodName, "yield"))) {
+            return false;
+        }
+        return true;
     }
 
     /*
@@ -161,80 +173,90 @@ public class StackTraceUtils {
      * keep both versions in sync, otherwise intrinsifications by the compiler will return different
      * results than stack walking at run time.
      */
-    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    public static boolean shouldShowFrame(Class<?> clazz, String methodName, boolean showLambdaFrames, boolean showReflectFrames, boolean showHiddenFrames) {
-        if (showHiddenFrames) {
-            /* No filtering, all frames including internal frames are shown. */
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+36/src/hotspot/share/oops/method.cpp#L1435-L1449")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+36/src/hotspot/share/classfile/vmIntrinsics.hpp#L1456-L1458")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+36/src/hotspot/share/classfile/vmIntrinsics.hpp#L1386-L1392")
+    public static boolean ignoredBySecurityStackWalk(FrameSourceInfo frameSourceInfo) {
+        Class<?> clazz = frameSourceInfo.getSourceClass();
+        if (isVMInternalFrameClass(clazz)) {
             return true;
         }
+        String methodName = frameSourceInfo.getSourceMethodName();
+        if (clazz == java.lang.reflect.Method.class && UninterruptibleUtils.String.equals("invoke", methodName)) {
+            /*
+             * Ignore a reflective method invocation frame. Note that the classes cannot be
+             * annotated with @InternalFrame because 1) they are JDK classes and 2) only one method
+             * of each class is affected.
+             */
+            return true;
+        }
+        if (clazz == SubstrateMethodAccessor.class || (RuntimeClassLoading.isSupported() && clazz == CremaMethodAccessor.class)) {
+            /*
+             * Ignore SVM's method accessor implementations like HotSpot ignores
+             * `MethodAccessorImpl`. Note that this does not ignore ConstructorAccessors, this is in
+             * line with HotSpot's behaviour.
+             */
+            return true;
+        }
+        if (clazz == MethodHandle.class && (methodName.equals("invokeBasic") || methodName.equals("linkToStatic") || methodName.equals("linkToVirtual") || methodName.equals("linkToSpecial") ||
+                        methodName.equals("linkToInterface") || methodName.equals("linkToNative"))) {
+            // MethodHandle intrinsic
+            return true;
+        }
+        if (FrameSourceInfo.MethodFlags.isLambdaFormCompiled(frameSourceInfo.getSourceMethodFlags())) {
+            return true;
+        }
+        return false;
+    }
 
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    static boolean isVMInternalFrameClass(Class<?> clazz) {
         if (clazz == null) {
             /*
              * We don't have a Java class. This must be an internal frame. This path mostly exists
              * to be defensive, there should actually never be a frame where we do not have a Java
-             * class.
+             * class. GR-76063: We should remove the need for this defensive check and ensure no
+             * such frames reach here.
              */
-            return false;
+            return true;
         }
-
-        if (DynamicHub.fromClass(clazz).isVMInternal()) {
-            return false;
-        }
-
-        if (!showLambdaFrames && DynamicHub.fromClass(clazz).isLambdaFormHidden()) {
-            return false;
-        }
-
-        if (!showReflectFrames) {
-            if (clazz == java.lang.reflect.Method.class && UninterruptibleUtils.String.equals("invoke", methodName)) {
-                /*
-                 * Ignore a reflective method invocation frame. Note that the classes cannot be
-                 * annotated with @InternalFrame because 1) they are JDK classes and 2) only one
-                 * method of each class is affected.
-                 */
-                return false;
-            } else if ((clazz == java.lang.reflect.Constructor.class || clazz == java.lang.Class.class) && UninterruptibleUtils.String.equals("newInstance", methodName)) {
-                /* Ignore a constructor invocation frame (see the comment above). */
-                return false;
-            }
-        }
-
-        if (clazz == Target_jdk_internal_vm_Continuation.class && (UninterruptibleUtils.String.startsWith(methodName, "enter") || UninterruptibleUtils.String.startsWith(methodName, "yield"))) {
-            return false;
-        }
-
-        return true;
+        return DynamicHub.fromClass(clazz).isVMInternal();
     }
 
     /*
      * Note that this method is duplicated (and commented) above for stack walking at run time. Make
      * sure to always keep both versions in sync.
      */
-    public static boolean shouldShowFrame(MetaAccessProvider metaAccess, ResolvedJavaMethod method, boolean showLambdaFrames, boolean showReflectFrames, boolean showHiddenFrames) {
-        if (showHiddenFrames) {
+    public static boolean ignoredBySecurityStackWalk(MetaAccessProvider metaAccess, MetaAccessExtensionProvider metaAccessExtensionProvider, ResolvedJavaMethod method) {
+        ResolvedJavaType clazz = method.getDeclaringClass();
+        if (isInternalVMMethods(clazz)) {
             return true;
         }
-
-        ResolvedJavaType clazz = method.getDeclaringClass();
-        if (AnnotationUtil.isAnnotationPresent(clazz, InternalVMMethod.class)) {
-            return false;
+        if (clazz.equals(metaAccess.lookupJavaType(Method.class)) && "invoke".equals(method.getName())) {
+            return true;
         }
-
-        if (!showLambdaFrames && AnnotationUtil.isAnnotationPresent(clazz, LambdaFormHiddenMethod.class)) {
-            return false;
+        if (clazz.equals(metaAccess.lookupJavaType(SubstrateMethodAccessor.class)) || (RuntimeClassLoading.isSupported() && clazz.equals(metaAccess.lookupJavaType(CremaMethodAccessor.class)))) {
+            return true;
         }
-
-        if (!showReflectFrames && ((clazz.equals(metaAccess.lookupJavaType(java.lang.reflect.Method.class)) && "invoke".equals(method.getName())) ||
-                        (clazz.equals(metaAccess.lookupJavaType(java.lang.reflect.Constructor.class)) && "newInstance".equals(method.getName())) ||
-                        (clazz.equals(metaAccess.lookupJavaType(java.lang.Class.class)) && "newInstance".equals(method.getName())))) {
-            return false;
+        if (clazz.equals(metaAccess.lookupJavaType(MethodHandle.class))) {
+            String methodName = method.getName();
+            if (methodName.equals("invokeBasic") || methodName.equals("linkToStatic") || methodName.equals("linkToVirtual") || methodName.equals("linkToSpecial") ||
+                            methodName.equals("linkToInterface") || methodName.equals("linkToNative")) {
+                // MethodHandle intrinsic
+                return true;
+            }
         }
-
-        return true;
+        if (metaAccessExtensionProvider.isLambdaFormCompiled(method)) {
+            return true;
+        }
+        return false;
     }
 
-    public static boolean ignoredBySecurityStackWalk(MetaAccessProvider metaAccess, ResolvedJavaMethod method) {
-        return !shouldShowFrame(metaAccess, method, true, false, false);
+    private static boolean isInternalVMMethods(ResolvedJavaType clazz) {
+        if (clazz instanceof SharedType sharedType) {
+            return sharedType.isInternalVMMethods();
+        }
+        return GuestAnnotationAccess.isAnnotationPresent(clazz, InternalVMMethod.class);
     }
 
     public static ClassLoader latestUserDefinedClassLoader(Pointer startSP) {
@@ -323,22 +345,15 @@ class BuildStackTraceVisitor extends JavaStackFrameVisitor {
 }
 
 class GetCallerClassVisitor extends JavaStackFrameVisitor {
-    private final boolean showLambdaFrames;
-    private int depth;
     private boolean ignoreFirst;
     Class<?> result;
 
-    GetCallerClassVisitor(boolean showLambdaFrames, int depth, boolean ignoreFirst) {
-        this.showLambdaFrames = showLambdaFrames;
+    GetCallerClassVisitor(boolean ignoreFirst) {
         this.ignoreFirst = ignoreFirst;
-        this.depth = depth;
-        assert depth >= 0;
     }
 
     @Override
     public boolean visitFrame(FrameSourceInfo frameSourceInfo, Pointer sp) {
-        assert depth >= 0;
-
         if (ignoreFirst) {
             /*
              * Skip the frame that contained the invocation of getCallerFrame() and continue the
@@ -346,22 +361,24 @@ class GetCallerClassVisitor extends JavaStackFrameVisitor {
              * not ignore it: For example, Constructor.newInstance calls Reflection.getCallerClass
              * and for this check Constructor.newInstance counts as a frame. But if the actual
              * invoked constructor calls Reflection.getCallerClass, then Constructor.newInstance
-             * does not count as as frame (handled by the shouldShowFrame check below because this
+             * does not count as a frame (handled by the shouldShowFrame check below because this
              * path was already taken for the constructor frame).
              */
-            ignoreFirst = false;
+            /*
+             * We want to make sure to use `ignoreFirst` for the first real frame. For example if
+             * Reflection.getCallerClass was called from the interpreter, we must skip the internal
+             * frames that are in between the caller and Reflection.getCallerClass.
+             */
+            if (!StackTraceUtils.isVMInternalFrameClass(frameSourceInfo.getSourceClass())) {
+                ignoreFirst = false;
+            }
             return true;
 
-        } else if (!StackTraceUtils.shouldShowFrame(frameSourceInfo, showLambdaFrames, false, false)) {
+        } else if (StackTraceUtils.ignoredBySecurityStackWalk(frameSourceInfo)) {
             /*
              * Always ignore the frame. It is an internal frame of the VM or a frame related to
              * reflection.
              */
-            return true;
-
-        } else if (depth > 0) {
-            /* Skip the number of frames specified by "depth". */
-            depth--;
             return true;
 
         } else {
@@ -369,26 +386,6 @@ class GetCallerClassVisitor extends JavaStackFrameVisitor {
             result = frameSourceInfo.getSourceClass();
             return false;
         }
-    }
-}
-
-class GetClassContextVisitor extends JavaStackFrameVisitor {
-    private int skip;
-    final ArrayList<Class<?>> trace;
-
-    GetClassContextVisitor(final int skip) {
-        trace = new ArrayList<>();
-        this.skip = skip;
-    }
-
-    @Override
-    public boolean visitFrame(FrameSourceInfo frameSourceInfo, Pointer sp) {
-        if (skip > 0) {
-            skip--;
-        } else if (StackTraceUtils.shouldShowFrame(frameSourceInfo, true, false, false)) {
-            trace.add(frameSourceInfo.getSourceClass());
-        }
-        return true;
     }
 }
 
@@ -400,7 +397,7 @@ class GetLatestUserDefinedClassLoaderVisitor extends JavaStackFrameVisitor {
 
     @Override
     public boolean visitFrame(FrameSourceInfo frameSourceInfo, Pointer sp) {
-        if (!StackTraceUtils.shouldShowFrame(frameSourceInfo, true, true, false)) {
+        if (!StackTraceUtils.shouldShowFrame(frameSourceInfo, true)) {
             // Skip internal frames.
             return true;
         }
@@ -417,45 +414,5 @@ class GetLatestUserDefinedClassLoaderVisitor extends JavaStackFrameVisitor {
 
     private static boolean isExtensionOrPlatformLoader(ClassLoader classLoader) {
         return classLoader == Target_jdk_internal_loader_ClassLoaders.platformClassLoader();
-    }
-}
-
-/* Reimplementation of JVM_GetStackAccessControlContext from JDK15 */
-class StackAccessControlContextVisitor extends JavaStackFrameVisitor {
-    final ArrayList<ProtectionDomain> localArray;
-    boolean isPrivileged;
-    ProtectionDomain previousProtectionDomain;
-    AccessControlContext privilegedContext;
-
-    StackAccessControlContextVisitor() {
-        localArray = new ArrayList<>();
-        isPrivileged = false;
-        privilegedContext = null;
-    }
-
-    @Override
-    public boolean visitFrame(FrameSourceInfo frameSourceInfo, Pointer sp) {
-        if (!StackTraceUtils.shouldShowFrame(frameSourceInfo, true, false, false)) {
-            return true;
-        }
-
-        Class<?> clazz = frameSourceInfo.getSourceClass();
-        String method = frameSourceInfo.getSourceMethodName();
-
-        ProtectionDomain protectionDomain;
-        if (PrivilegedStack.length() > 0 && clazz.equals(AccessController.class) && method.equals("doPrivileged")) {
-            isPrivileged = true;
-            privilegedContext = PrivilegedStack.peekContext();
-            protectionDomain = PrivilegedStack.peekCaller().getProtectionDomain();
-        } else {
-            protectionDomain = clazz.getProtectionDomain();
-        }
-
-        if ((protectionDomain != null) && (previousProtectionDomain == null || !previousProtectionDomain.equals(protectionDomain))) {
-            localArray.add(protectionDomain);
-            previousProtectionDomain = protectionDomain;
-        }
-
-        return !isPrivileged;
     }
 }

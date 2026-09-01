@@ -38,6 +38,7 @@ import jdk.graal.compiler.debug.GraalError;
 import jdk.graal.compiler.graph.Node;
 import jdk.graal.compiler.graph.NodeStack;
 import jdk.graal.compiler.graph.Position;
+import jdk.graal.compiler.guards.optimistic.OptimisticFixedGuardNode;
 import jdk.graal.compiler.nodeinfo.InputType;
 import jdk.graal.compiler.nodes.BinaryOpLogicNode;
 import jdk.graal.compiler.nodes.DeoptimizingGuard;
@@ -59,10 +60,11 @@ import jdk.graal.compiler.nodes.calc.IntegerBelowNode;
 import jdk.graal.compiler.nodes.calc.IntegerConvertNode;
 import jdk.graal.compiler.nodes.calc.IntegerEqualsNode;
 import jdk.graal.compiler.nodes.calc.TernaryNode;
-import jdk.graal.compiler.nodes.calc.UnaryNode;
 import jdk.graal.compiler.nodes.calc.UnaryArithmeticNode;
+import jdk.graal.compiler.nodes.calc.UnaryNode;
 import jdk.graal.compiler.nodes.extended.GuardingNode;
 import jdk.graal.compiler.nodes.spi.ValueProxy;
+import jdk.graal.compiler.phases.common.util.LoopUtility;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.TriState;
 
@@ -108,6 +110,23 @@ public class ConditionalEliminationUtil {
 
         public boolean isNegated() {
             return negated;
+        }
+    }
+
+    /**
+     * Records a condition proof without applying the guard rewrite that would normally consume it.
+     */
+    private static final class ConditionProof {
+        private GuardingNode guard;
+        private boolean result;
+        private Stamp guardedValueStamp;
+        private ValueNode newInput;
+
+        void record(GuardingNode newGuard, boolean newResult, Stamp newGuardedValueStamp, ValueNode newInputValue) {
+            guard = newGuard;
+            result = newResult;
+            guardedValueStamp = newGuardedValueStamp;
+            newInput = newInputValue;
         }
     }
 
@@ -428,23 +447,58 @@ public class ConditionalEliminationUtil {
     }
 
     /**
-     * Checks whether {@code candidate} is {@code upper - 1}.
+     * Checks whether {@code lower + lowerAddendOuter} is strictly below {@code upper}. Optional
+     * constant addends are stripped from {@code lower} and {@code upper}; the proof always requires
+     * both resulting bases to be the same value and then checks whether
+     * {@code lowerAddend + lowerAddendOuter < upperAddend}.
      */
-    private static boolean isUpperMinusOne(ValueNode candidate, ValueNode upper) {
-        if (candidate instanceof AddNode add && add.getX() == upper) {
-            ValueNode value = add.getY();
-            return value.isJavaConstant() && value.asJavaConstant().asLong() == -1L;
+    private static boolean isStrictlyBelowAfterAdd(ValueNode lower, long lowerAddendOuter, ValueNode upper) {
+        ValueNode lowerBase = lower;
+        long lowerAddend = 0;
+        if (lower instanceof AddNode add && add.getY().isJavaConstant() && add.getY().stamp(NodeView.DEFAULT).isIntegerStamp()) {
+            lowerBase = add.getX();
+            lowerAddend = add.getY().asJavaConstant().asLong();
         }
-        return false;
+
+        ValueNode upperBase = upper;
+        long upperAddend = 0;
+        if (upper instanceof AddNode add && add.getY().isJavaConstant() && add.getY().stamp(NodeView.DEFAULT).isIntegerStamp()) {
+            upperBase = add.getX();
+            upperAddend = add.getY().asJavaConstant().asLong();
+        }
+
+        if (lowerAddendOuter < 0 || upperAddend > 0 || lowerBase != upperBase) {
+            return false;
+        }
+        try {
+            long lowerAddendSum = LoopUtility.addExact(((IntegerStamp) lower.stamp(NodeView.DEFAULT)).getBits(), lowerAddend, lowerAddendOuter);
+            return lowerAddendSum < upperAddend;
+        } catch (ArithmeticException e) {
+            return false;
+        }
     }
 
     /**
-     * Proves a masked unsigned-below check after proving that the upper value is positive.
+     * Proves a masked unsigned-below check after proving that the mask value is non-negative and
+     * strictly below the upper bound. The basic pattern is:
      *
      * <pre>{@code
      * if (upper > 0) {
      *     int lower = index & (upper - 1);
      *     if (Integer.compareUnsigned(lower, upper) < 0) {
+     *         inBounds();
+     *     }
+     * }
+     * }</pre>
+     *
+     * This also handles constant addends on the masked lower value, the mask value, and the upper
+     * value, as long as the mask and upper value have the same base and the resulting mask plus the
+     * lower addend is still strictly below the upper value:
+     *
+     * <pre>{@code
+     * if (base + upperAddend > 0) {
+     *     int lower = (index & (base + maskAddend)) + lowerAddend;
+     *     if (Integer.compareUnsigned(lower, base + upperAddend) < 0) {
      *         inBounds();
      *     }
      * }
@@ -460,24 +514,46 @@ public class ConditionalEliminationUtil {
             return false;
         }
         ValueNode upper = integerBelowNode.getY();
-        // Check that lower is index & (upper - 1).
         ValueNode lower = integerBelowNode.getX();
-        if (!(lower instanceof AndNode and && (isUpperMinusOne(and.getX(), upper) || isUpperMinusOne(and.getY(), upper)))) {
+        ValueNode lowerBase = lower;
+        long lowerAddend = 0;
+        if (lower instanceof AddNode add && add.getY().isJavaConstant() && add.getY().stamp(NodeView.DEFAULT).isIntegerStamp()) {
+            lowerBase = add.getX();
+            lowerAddend = add.getY().asJavaConstant().asLong();
+        }
+        if (!(lowerBase instanceof AndNode and)) {
             return false;
         }
-        InfoElement infoElement = infoElementProvider.infoElements(upper);
-        while (infoElement != null) {
-            // Check that upper is positive.
-            if (infoElement.getStamp() instanceof IntegerStamp integerStamp && integerStamp.lowerBound() > 0) {
-                return rewireGuards(infoElement.getGuard(), true, infoElement.getProxifiedInput(), infoElement.getStamp(), rewireGuardFunction);
-            }
-            infoElement = infoElementProvider.nextElement(infoElement);
+        ValueNode mask = null;
+        if (isStrictlyBelowAfterAdd(and.getX(), lowerAddend, upper)) {
+            mask = and.getX();
+        } else if (isStrictlyBelowAfterAdd(and.getY(), lowerAddend, upper)) {
+            mask = and.getY();
+        }
+        if (mask == null) {
+            return false;
+        }
+        Pair<InfoElement, Stamp> foldedMask = recursiveFoldStampFromInfo(infoElementProvider, mask);
+        if (foldedMask != null && foldedMask.getRight() instanceof IntegerStamp integerStamp && integerStamp.lowerBound() >= 0) {
+            return rewireGuards(foldedMask.getLeft().getGuard(), true, foldedMask.getLeft().getProxifiedInput(), foldedMask.getRight(), rewireGuardFunction);
         }
         return false;
     }
 
     public static boolean rewireGuards(GuardingNode guard, boolean result, ValueNode proxifiedInput, Stamp guardedValueStamp, GuardRewirer rewireGuardFunction) {
+        if (!mayRewriteToGuard(guard)) {
+            return false;
+        }
         return rewireGuardFunction.rewire(guard, result, guardedValueStamp, proxifiedInput);
+    }
+
+    /**
+     * Determines whether this guard may be used as an anchor for general guards or Pi nodes.
+     * Optimistic guards that cannot deoptimize are meant to be reverted before lowering, so they
+     * must not have usages that would keep them alive as a deopt.
+     */
+    static boolean mayRewriteToGuard(GuardingNode guard) {
+        return !(guard instanceof OptimisticFixedGuardNode optimisticGuard && !optimisticGuard.canDeoptimize());
     }
 
     @FunctionalInterface
@@ -668,33 +744,79 @@ public class ConditionalEliminationUtil {
                     }
                 }
             }
-        } else if (node instanceof ShortCircuitOrNode) {
-            final ShortCircuitOrNode shortCircuitOrNode = (ShortCircuitOrNode) node;
-            return tryProveGuardCondition(infoElementProvider, conditions, guardFolding, null, shortCircuitOrNode.getX(), (guard, result, guardedValueStamp, newInput) -> {
-                if (result == !shortCircuitOrNode.isXNegated()) {
-                    return rewireGuards(guard, true, newInput, guardedValueStamp, rewireGuardFunction);
-                } else {
-                    return tryProveGuardCondition(infoElementProvider, conditions, guardFolding, null, shortCircuitOrNode.getY(), (innerGuard, innerResult, innerGuardedValueStamp, innerNewInput) -> {
-                        ValueNode proxifiedInput = newInput;
-                        if (proxifiedInput == null) {
-                            proxifiedInput = innerNewInput;
-                        } else if (innerNewInput != null) {
-                            if (innerNewInput != newInput) {
-                                // Cannot canonicalize due to different proxied inputs.
-                                return false;
-                            }
-                        }
-                        // Can only canonicalize if the guards are equal.
-                        if (innerGuard == guard) {
-                            return rewireGuards(guard, innerResult ^ shortCircuitOrNode.isYNegated(), proxifiedInput, guardedValueStamp, rewireGuardFunction);
-                        }
-                        return false;
-                    }, allowControlFlowDependentOtherStamp, search);
-                }
-            }, allowControlFlowDependentOtherStamp, search);
+        } else if (node instanceof ShortCircuitOrNode shortCircuitOrNode) {
+            return tryProveShortCircuitOr(infoElementProvider, conditions, shortCircuitOrNode, rewireGuardFunction, allowControlFlowDependentOtherStamp, search);
         }
 
         return false;
+    }
+
+    /**
+     * Proves a short circuit OR from proofs of its operands. Operand proofs are collected before
+     * applying the rewrite, so the second proof cannot depend on a graph mutation from the first.
+     */
+    private static boolean tryProveShortCircuitOr(InfoElementProvider infoElementProvider, ArrayDeque<GuardedCondition> conditions, ShortCircuitOrNode node,
+                    GuardRewirer rewireGuardFunction, boolean allowControlFlowDependentOtherStamp, SafeStampInputSearch search) {
+        ConditionProof xProof = proveCondition(infoElementProvider, conditions, node.getX(), allowControlFlowDependentOtherStamp, search);
+        ConditionProof yProof = proveCondition(infoElementProvider, conditions, node.getY(), allowControlFlowDependentOtherStamp, search);
+
+        if (xProof != null && (xProof.result ^ node.isXNegated())) {
+            return rewireGuards(xProof.guard, true, xProof.newInput, xProof.guardedValueStamp, rewireGuardFunction);
+        }
+        if (yProof != null && (yProof.result ^ node.isYNegated())) {
+            return rewireGuards(yProof.guard, true, yProof.newInput, yProof.guardedValueStamp, rewireGuardFunction);
+        }
+        if (xProof != null && yProof != null) {
+            ConditionProof proofWithDeepestGuard = findProofWithDeepestGuard(conditions, xProof, yProof);
+            if (proofWithDeepestGuard != null) {
+                return rewireGuards(proofWithDeepestGuard.guard, false, proofWithDeepestGuard.newInput, proofWithDeepestGuard.guardedValueStamp, rewireGuardFunction);
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Selects a proof whose guard is dominated by both operand proof guards. Active conditions are
+     * ordered from the closest dominator to the farthest one, so the first matching guard is safe
+     * to use when rewiring a condition proven false by both operands.
+     */
+    private static ConditionProof findProofWithDeepestGuard(ArrayDeque<GuardedCondition> conditions, ConditionProof xProof, ConditionProof yProof) {
+        if (xProof.guard == yProof.guard) {
+            return xProof;
+        }
+        ConditionProof deepestProof = null;
+        boolean foundXProofGuard = false;
+        boolean foundYProofGuard = false;
+        for (GuardedCondition condition : conditions) {
+            if (condition.getGuard() == xProof.guard) {
+                foundXProofGuard = true;
+                if (deepestProof == null) {
+                    deepestProof = xProof;
+                }
+            } else if (condition.getGuard() == yProof.guard) {
+                foundYProofGuard = true;
+                if (deepestProof == null) {
+                    deepestProof = yProof;
+                }
+            }
+        }
+        return foundXProofGuard && foundYProofGuard ? deepestProof : null;
+    }
+
+    /**
+     * Uses the regular condition proof machinery but records its result instead of changing the
+     * graph.
+     */
+    private static ConditionProof proveCondition(InfoElementProvider infoElementProvider, ArrayDeque<GuardedCondition> conditions, LogicNode node,
+                    boolean allowControlFlowDependentOtherStamp, SafeStampInputSearch search) {
+        ConditionProof proof = new ConditionProof();
+        if (tryProveGuardCondition(infoElementProvider, conditions, null, null, node, (guard, result, guardedValueStamp, newInput) -> {
+            proof.record(guard, result, guardedValueStamp, newInput);
+            return true;
+        }, allowControlFlowDependentOtherStamp, search)) {
+            return proof;
+        }
+        return null;
     }
 
 }

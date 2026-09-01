@@ -35,11 +35,12 @@ import org.graalvm.word.UnsignedWord;
 
 import com.oracle.svm.core.heap.StoredContinuation;
 import com.oracle.svm.core.heap.StoredContinuationAccess;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.core.stack.JavaFrameAnchor;
 import com.oracle.svm.core.stack.JavaFrameAnchors;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.thread.VMThreads;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.util.VMError;
 
@@ -75,7 +76,17 @@ public abstract class FrameAccess {
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public void writeReturnAddress(IsolateThread thread, Pointer sourceSp, CodePointer newReturnAddress) {
         verifyReturnAddressWithinJavaStack(thread, sourceSp);
-        unsafeReturnAddressLocation(sourceSp).writeWord(0, newReturnAddress);
+        unsafeReturnAddressLocation(sourceSp).writeWord(0, encodeReturnAddress(sourceSp, newReturnAddress));
+    }
+
+    /**
+     * Produces the architecture-specific representation of a return address for storage on the
+     * stack. {@code sourceSp} must be the stack pointer that the returning epilogue will use, rather
+     * than the address of the return-address slot.
+     */
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public CodePointer encodeReturnAddress(@SuppressWarnings("unused") Pointer sourceSp, CodePointer returnAddress) {
+        return returnAddress;
     }
 
     /**
@@ -125,6 +136,23 @@ public abstract class FrameAccess {
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public Pointer unsafeReturnAddressLocation(Pointer sourceSp) {
         return sourceSp.subtract(returnAddressSize());
+    }
+
+    /**
+     * Do not use this method unless absolutely necessary as it does not perform any verification.
+     * It is very easy to accidentally access a native frame, which can result in hard-to-debug
+     * transient failures.
+     */
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public Pointer unsafePreservedFramePointerLocation(Pointer sourceSp) {
+        /*
+         * Note that even without PreserveFramePointer, frames can have a frame pointer *slot*, but
+         * it contains just an arbitrary callee-saved register value.
+         */
+        VMError.guarantee(SubstrateOptions.PreserveFramePointer.getValue());
+
+        VMError.guarantee(!SubstrateOptions.useLLVMBackend(), "unsupported: LLVM frame layouts can deviate");
+        return unsafeReturnAddressLocation(sourceSp).subtract(SubstrateTarget.getWordSize());
     }
 
     @Fold

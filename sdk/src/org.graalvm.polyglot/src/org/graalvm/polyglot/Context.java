@@ -64,6 +64,7 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.stream.StreamSupport;
 
+import org.graalvm.polyglot.Engine.ToStringSupport;
 import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractContextDispatch;
 import org.graalvm.polyglot.impl.AbstractPolyglotImpl.IOAccessor;
 import org.graalvm.polyglot.io.FileSystem;
@@ -831,6 +832,20 @@ public final class Context implements AutoCloseable {
     @Override
     public int hashCode() {
         return Objects.hashCode(receiver);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @since 25.3
+     */
+    @Override
+    public String toString() {
+        try {
+            return dispatch.toString(receiver, System.identityHashCode(this), null);
+        } finally {
+            Reference.reachabilityFence(creatorContext);
+        }
     }
 
     /**
@@ -2051,7 +2066,7 @@ public final class Context implements AutoCloseable {
          * Sets a host class loader. If set the given {@code classLoader} is used to load host
          * classes and it's also set as a {@link Thread#setContextClassLoader(java.lang.ClassLoader)
          * context ClassLoader} during code execution. Otherwise the ClassLoader that was captured
-         * when the context was {@link #build() built} is used to to load host classes and the
+         * when the context was {@link #build() built} is used to load host classes and the
          * {@link Thread#setContextClassLoader(java.lang.ClassLoader) context ClassLoader} is not
          * set during code execution. Setting the hostClassLoader has a negative effect on enter and
          * leave performance.
@@ -2293,6 +2308,132 @@ public final class Context implements AutoCloseable {
         }
 
         /**
+         * {@inheritDoc}
+         *
+         * @since 25.3
+         */
+        @Override
+        public String toString() {
+            StringBuilder b = new StringBuilder("Context.newBuilder(");
+            String separator = "";
+            for (String language : permittedLanguages) {
+                b.append(separator);
+                b.append(ToStringSupport.quote(language));
+                separator = ", ";
+            }
+            b.append(')');
+            if (sharedEngine != null) {
+                ToStringSupport.appendCall(b, "engine", sharedEngine);
+            }
+            if (out != null) {
+                ToStringSupport.appendCall(b, "out", out);
+            }
+            if (err != null) {
+                ToStringSupport.appendCall(b, "err", err);
+            }
+            if (in != null) {
+                ToStringSupport.appendCall(b, "in", in);
+            }
+            if (options != null) {
+                for (Map.Entry<String, String> entry : options.entrySet()) {
+                    ToStringSupport.appendCall(b, "option", ToStringSupport.quote(entry.getKey()), ToStringSupport.quote(entry.getValue()));
+                }
+            }
+            if (arguments != null) {
+                for (Map.Entry<String, String[]> entry : arguments.entrySet()) {
+                    ToStringSupport.appendCall(b, "arguments", ToStringSupport.quote(entry.getKey()), ToStringSupport.stringArray(entry.getValue()));
+                }
+            }
+            if (messageTransport != null) {
+                ToStringSupport.appendCall(b, "serverTransport", messageTransport);
+            }
+            if (customLogHandler != null) {
+                ToStringSupport.appendCall(b, "logHandler", customLogHandler);
+            }
+            if (resourceLimits != null) {
+                ToStringSupport.appendCall(b, "resourceLimits", resourceLimits);
+            }
+            if (sandboxPolicy != null) {
+                ToStringSupport.appendCall(b, "sandbox", "SandboxPolicy." + sandboxPolicy);
+            }
+            if (zone != null) {
+                ToStringSupport.appendCall(b, "timeZone", "ZoneId.of(" + ToStringSupport.quote(zone.getId()) + ")");
+            }
+            if (processHandler != null) {
+                ToStringSupport.appendCall(b, "processHandler", processHandler);
+            }
+            if (environment != null) {
+                for (Map.Entry<String, String> entry : environment.entrySet()) {
+                    ToStringSupport.appendCall(b, "environment", ToStringSupport.quote(entry.getKey()), ToStringSupport.quote(entry.getValue()));
+                }
+            }
+            if (currentWorkingDirectory != null) {
+                ToStringSupport.appendCall(b, "currentWorkingDirectory", "Path.of(" + ToStringSupport.quote(currentWorkingDirectory.toString()) + ")");
+            }
+            if (hostClassLoader != null) {
+                ToStringSupport.appendCall(b, "hostClassLoader", hostClassLoader);
+            }
+            if (useSystemExit) {
+                ToStringSupport.appendCall(b, "useSystemExit", true);
+            }
+            if (allowAllAccess) {
+                ToStringSupport.appendCall(b, "allowAllAccess", true);
+            }
+            if (allowHostAccess != null) {
+                ToStringSupport.appendCall(b, "allowHostAccess", allowHostAccess);
+            }
+            if (hostAccess != null) {
+                ToStringSupport.appendCall(b, "allowHostAccess", hostAccess);
+            }
+            if (allowIO != null) {
+                ToStringSupport.appendCall(b, "allowIO", allowIO);
+            }
+            if (ioAccess != null) {
+                ToStringSupport.appendCall(b, "allowIO", ioAccess);
+            }
+            if (customFileSystem != null) {
+                ToStringSupport.appendCall(b, "fileSystem", customFileSystem);
+            }
+            if (allowNativeAccess != null) {
+                ToStringSupport.appendCall(b, "allowNativeAccess", allowNativeAccess);
+            }
+            if (allowCreateThread != null) {
+                ToStringSupport.appendCall(b, "allowCreateThread", allowCreateThread);
+            }
+            if (allowHostClassLoading != null) {
+                ToStringSupport.appendCall(b, "allowHostClassLoading", allowHostClassLoading);
+            }
+            if (hostClassFilter != UNSET_HOST_LOOKUP) {
+                ToStringSupport.appendCall(b, "allowHostClassLookup", hostClassFilter);
+            }
+            if (environmentAccess != null) {
+                ToStringSupport.appendCall(b, "allowEnvironmentAccess", environmentAccess);
+            }
+            if (allowExperimentalOptions != null) {
+                ToStringSupport.appendCall(b, "allowExperimentalOptions", allowExperimentalOptions);
+            }
+            if (polyglotAccess != null) {
+                ToStringSupport.appendCall(b, "allowPolyglotAccess", polyglotAccess);
+            }
+            if (!allowValueSharing) {
+                ToStringSupport.appendCall(b, "allowValueSharing", false);
+            }
+            if (allowInnerContextOptions != null) {
+                ToStringSupport.appendCall(b, "allowInnerContextOptions", allowInnerContextOptions);
+            }
+            if (allowCreateProcess != null) {
+                ToStringSupport.appendCall(b, "allowCreateProcess", allowCreateProcess);
+            }
+            if (exceptionHandler != null) {
+                ToStringSupport.appendCall(b, "exceptionHandler", exceptionHandler);
+            }
+            if (spawnIsolate != null) {
+                ToStringSupport.appendCall(b, "spawnIsolate", spawnIsolate);
+            }
+            return b.toString();
+        }
+
+        /**
          * Validates configured sandbox policy constrains.
          *
          * @throws IllegalArgumentException if the context configuration is not compatible with the
@@ -2377,11 +2518,17 @@ public final class Context implements AutoCloseable {
                                     "do not set Builder.allowHostAccess(boolean) to use the sandbox policy preset or set Builder.allowHostAccess(HostAccess)");
                 }
                 if (hostAccess != null) {
-                    if (hostAccess.allowPublic) {
+                    if (hostAccess.allowsAllPublicAccess()) {
                         throw Engine.Builder.throwSandboxException(useSandboxPolicy,
                                         "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowPublicAccess(boolean) set to true, " +
                                                         "but HostAccess.Builder.allowPublicAccess(boolean) must not be set to true.",
                                         "do not set HostAccess.Builder.allowPublicAccess(boolean)");
+                    }
+                    if (hostAccess.hasPublicAccessPredicate()) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowPublicAccess(Predicate) configured, " +
+                                                        "but HostAccess.Builder.allowPublicAccess(Predicate) must not be configured.",
+                                        "do not configure HostAccess.Builder.allowPublicAccess(Predicate)");
                     }
                     if (hostAccess.allowAccessInheritance) {
                         throw Engine.Builder.throwSandboxException(useSandboxPolicy,

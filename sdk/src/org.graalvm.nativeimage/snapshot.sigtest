@@ -982,6 +982,7 @@ innr public abstract interface static DuringSetupAccess
 innr public abstract interface static FeatureAccess
 innr public abstract interface static IsInConfigurationAccess
 innr public abstract interface static OnAnalysisExitAccess
+innr public abstract interface static OnRegistrationAccess
 innr public abstract interface static QueryReachabilityAccess
 meth public boolean isInConfiguration(org.graalvm.nativeimage.hosted.Feature$IsInConfigurationAccess)
 meth public java.lang.String getDescription()
@@ -1001,6 +1002,7 @@ meth public void cleanup()
 meth public void duringAnalysis(org.graalvm.nativeimage.hosted.Feature$DuringAnalysisAccess)
 meth public void duringSetup(org.graalvm.nativeimage.hosted.Feature$DuringSetupAccess)
 meth public void onAnalysisExit(org.graalvm.nativeimage.hosted.Feature$OnAnalysisExitAccess)
+meth public void onRegistration(org.graalvm.nativeimage.hosted.Feature$OnRegistrationAccess)
 
 CLSS public abstract interface static org.graalvm.nativeimage.hosted.Feature$AfterAnalysisAccess
  outer org.graalvm.nativeimage.hosted.Feature
@@ -1075,6 +1077,8 @@ CLSS public abstract interface static org.graalvm.nativeimage.hosted.Feature$Dur
 intf org.graalvm.nativeimage.hosted.Feature$FeatureAccess
 meth public abstract <%0 extends java.lang.Object> void registerObjectReachabilityHandler(java.util.function.Consumer<{%%0}>,java.lang.Class<{%%0}>)
 meth public abstract void registerObjectReplacer(java.util.function.Function<java.lang.Object,java.lang.Object>)
+meth public abstract void registerBuildTimeBootstrapIndy(java.lang.reflect.Executable)
+meth public abstract void registerBuildTimeBootstrapCondy(java.lang.reflect.Executable)
 
 CLSS public abstract interface static org.graalvm.nativeimage.hosted.Feature$FeatureAccess
  outer org.graalvm.nativeimage.hosted.Feature
@@ -1088,6 +1092,10 @@ CLSS public abstract interface static org.graalvm.nativeimage.hosted.Feature$IsI
 intf org.graalvm.nativeimage.hosted.Feature$FeatureAccess
 
 CLSS public abstract interface static org.graalvm.nativeimage.hosted.Feature$OnAnalysisExitAccess
+ outer org.graalvm.nativeimage.hosted.Feature
+intf org.graalvm.nativeimage.hosted.Feature$FeatureAccess
+
+CLSS public abstract interface static org.graalvm.nativeimage.hosted.Feature$OnRegistrationAccess
  outer org.graalvm.nativeimage.hosted.Feature
 intf org.graalvm.nativeimage.hosted.Feature$FeatureAccess
 
@@ -1235,4 +1243,3 @@ CLSS public abstract interface org.graalvm.word.WordBase
 meth public abstract boolean equals(java.lang.Object)
  anno 0 java.lang.Deprecated(boolean forRemoval=false, java.lang.String since="")
 meth public abstract long rawValue()
-

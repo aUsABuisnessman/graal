@@ -24,6 +24,7 @@
  */
 package com.oracle.svm.hosted.foreign;
 
+import static com.oracle.svm.core.invoke.MethodHandleUtils.JLI_PACKAGE;
 import static java.lang.invoke.MethodHandles.exactInvoker;
 import static java.lang.invoke.MethodHandles.insertArguments;
 
@@ -72,13 +73,13 @@ import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.AnalysisUniverse;
 import com.oracle.svm.common.meta.MethodVariant;
 import com.oracle.svm.configure.ConfigurationParser;
-import com.oracle.svm.core.BuildPhaseProvider;
+import com.oracle.svm.shared.BuildPhaseProvider;
 import com.oracle.svm.core.ForeignSupport;
 import com.oracle.svm.core.JavaMemoryUtil;
 import com.oracle.svm.core.OS;
 import com.oracle.svm.core.ParsingReason;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.UnmanagedMemoryUtil;
+import com.oracle.svm.guest.staging.core.UnmanagedMemoryUtil;
 import com.oracle.svm.core.code.FactoryMethodHolder;
 import com.oracle.svm.core.code.FactoryThrowMethodHolder;
 import com.oracle.svm.core.feature.InternalFeature;
@@ -99,6 +100,7 @@ import com.oracle.svm.core.graal.meta.SubstrateForeignCallsProvider;
 import com.oracle.svm.core.jdk.VectorAPIEnabled;
 import com.oracle.svm.core.meta.MethodPointer;
 import com.oracle.svm.core.nodes.SubstrateMethodCallTargetNode;
+import com.oracle.svm.core.sboutlining.OutlinedSBMethodHolder;
 import com.oracle.svm.core.thread.JavaThreads;
 import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.hosted.ConditionalConfigurationRegistry;
@@ -124,7 +126,7 @@ import com.oracle.svm.shared.util.ModuleSupport;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.util.AnnotationUtil;
+import com.oracle.svm.util.GuestAnnotationAccess;
 
 import jdk.graal.compiler.api.replacements.Fold;
 import jdk.graal.compiler.debug.GraalError;
@@ -287,8 +289,8 @@ public class ForeignFunctionsFeature implements InternalFeature, ForeignHostedSu
                 /*
                  * Downcall stub invokers exist per MethodType and may be used to invoke several
                  * downcall stubs. Ensure the invoker independently from the downcall stub
-                 * registration above: the downcall stub may already exist even though the compatible
-                 * invoker has not been created yet.
+                 * registration above: the downcall stub may already exist even though the
+                 * compatible invoker has not been created yet.
                  */
                 ensureDowncallStubInvokerRegistered(resolve.methodType());
             }
@@ -488,6 +490,11 @@ public class ForeignFunctionsFeature implements InternalFeature, ForeignHostedSu
     }
 
     @Override
+    public void onRegistration(OnRegistrationAccess access) {
+        ImageSingletons.add(ForeignFunctionsFeature.class, this);
+    }
+
+    @Override
     public void afterRegistration(AfterRegistrationAccess access) {
         abiUtils = AbiUtils.create();
         accessSupport = new RuntimeForeignAccessSupportImpl();
@@ -682,8 +689,8 @@ public class ForeignFunctionsFeature implements InternalFeature, ForeignHostedSu
             this.adaptUpcallForIMRMethod = ReflectionUtil.lookupMethod(SharedUtils.class, "adaptUpcallForIMR", MethodHandle.class, boolean.class);
         }
 
-        @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-24+25/src/java.base/share/classes/jdk/internal/foreign/abi/AbstractLinker.java#L117-L135")
-        @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/SharedUtils.java#L191-L210")
+        @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-24+25/src/java.base/share/classes/jdk/internal/foreign/abi/AbstractLinker.java#L117-L135")
+        @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/SharedUtils.java#L191-L210")
         @Override
         public DirectUpcall createKey(AbiUtils abiUtils, DirectUpcallDesc desc) {
             MethodHandle target = desc.mh();
@@ -766,8 +773,8 @@ public class ForeignFunctionsFeature implements InternalFeature, ForeignHostedSu
          * Looks up a field of type {@link UnaryOperator}, reads its value and returns it. There
          * must be exactly one such field that is readable. Otherwise, an Error is thrown.
          */
-        @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/UpcallLinker.java#L62-L110")
-        @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/SharedUtils.java#L201-L207")
+        @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/UpcallLinker.java#L62-L110")
+        @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/SharedUtils.java#L201-L207")
         private static UnaryOperator<MethodHandle> lookupAndReadUnaryOperatorField(AbstractLinker.UpcallStubFactory outerFactory, boolean inMemoryReturn) {
             AbstractLinker.UpcallStubFactory upcallStubFactory = outerFactory;
 
@@ -813,8 +820,6 @@ public class ForeignFunctionsFeature implements InternalFeature, ForeignHostedSu
 
     private static final Linker LINKER = Linker.nativeLinker();
 
-    private static final String JLI_PACKAGE = "java.lang.invoke";
-
     /**
      * List of (generated) classes that provide accessor methods for memory segments. Those methods
      * are referenced with {@code java.lang.invoke.SegmentVarHandle}. Unfortunately, the classes
@@ -823,7 +828,7 @@ public class ForeignFunctionsFeature implements InternalFeature, ForeignHostedSu
      * {@link com.oracle.svm.hosted.methodhandles.MethodHandleFeature#beforeAnalysis}) does not
      * trigger.
      */
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+13/src/java.base/share/classes/java/lang/invoke/VarHandles.java#L313-L344") //
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+13/src/java.base/share/classes/java/lang/invoke/VarHandles.java#L313-L344") //
     private static final List<String> VAR_HANDLE_SEGMENT_ACCESSORS = List.of(
                     "VarHandleSegmentAsBooleans",
                     "VarHandleSegmentAsBytes",
@@ -914,12 +919,13 @@ public class ForeignFunctionsFeature implements InternalFeature, ForeignHostedSu
      * and are known to never access a (potentially already closed) memory session. Thus, such
      * callees can be excluded during verification.
      */
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+14/src/java.base/share/classes/java/nio/MappedMemoryUtils.java")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+14/src/java.base/share/classes/java/nio/MappedMemoryUtils.java")
     protected void initSafeArenaAccessors(BeforeAnalysisAccessImpl access) throws NoSuchMethodException {
         MetaAccessProvider metaAccess = access.getMetaAccess();
 
         registerSafeArenaAccessorClass(metaAccess, FactoryMethodHolder.class);
         registerSafeArenaAccessorClass(metaAccess, FactoryThrowMethodHolder.class);
+        registerSafeArenaAccessorClass(metaAccess, OutlinedSBMethodHolder.class);
         registerSafeArenaAccessorClass(metaAccess, LogUtils.class);
 
         /*
@@ -1036,7 +1042,7 @@ public class ForeignFunctionsFeature implements InternalFeature, ForeignHostedSu
                 if (MethodVariant.isOriginalMethod(b.getMethod())) { // not for hosted compilation
                     return false;
                 }
-                if (!AnnotationUtil.isAnnotationPresent(b.getMethod(), SharedArenaSupport.SCOPED_ANNOTATION)) {
+                if (!GuestAnnotationAccess.isAnnotationPresent(b.getMethod(), SharedArenaSupport.SCOPED_ANNOTATION)) {
                     return false;
                 }
                 MethodCallTargetNode mt = b.add(new SubstrateMethodCallTargetNode(InvokeKind.Static, checkValidStateRawInRuntimeCompiledCode, args, b.getInvokeReturnStamp(b.getAssumptions())));
@@ -1050,7 +1056,7 @@ public class ForeignFunctionsFeature implements InternalFeature, ForeignHostedSu
      * Invocation plugin to initialize the ValueLayouts' VarHandle cache (which is annotated
      * with @Stable) early. This should enable intrinsification of the VarHandles.
      */
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25.0.2+4/src/java.base/share/classes/jdk/internal/foreign/layout/ValueLayouts.java#L69-L70")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25.0.2+4/src/java.base/share/classes/jdk/internal/foreign/layout/ValueLayouts.java#L69-L70")
     private static final class FoldValueLayoutVarHandlePlugin extends RequiredInvocationPlugin {
         private final Class<?> receiverClass;
         private final Function<Object, VarHandle> varHandleInvoker;

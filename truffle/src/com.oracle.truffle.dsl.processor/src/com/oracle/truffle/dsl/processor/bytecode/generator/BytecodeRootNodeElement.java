@@ -85,6 +85,7 @@ import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
+import javax.lang.model.type.ArrayType;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.ElementFilter;
@@ -96,6 +97,7 @@ import com.oracle.truffle.dsl.processor.bytecode.model.BytecodeDSLModel.LoadIlle
 import com.oracle.truffle.dsl.processor.bytecode.model.CustomOperationModel;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.ImmediateKind;
+import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.ImmediateWidth;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.InstructionImmediate;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.InstructionImmediateEncoding;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.InstructionKind;
@@ -121,6 +123,7 @@ import com.oracle.truffle.dsl.processor.java.model.CodeNames;
 import com.oracle.truffle.dsl.processor.java.model.CodeTree;
 import com.oracle.truffle.dsl.processor.java.model.CodeTreeBuilder;
 import com.oracle.truffle.dsl.processor.java.model.CodeTypeElement;
+import com.oracle.truffle.dsl.processor.java.model.CodeTypeMirror;
 import com.oracle.truffle.dsl.processor.java.model.CodeTypeParameterElement;
 import com.oracle.truffle.dsl.processor.java.model.CodeVariableElement;
 import com.oracle.truffle.dsl.processor.java.model.GeneratedTypeMirror;
@@ -314,7 +317,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
             dataClasses.add(createCachedDataClass(instr, consts));
         }
         if (model.epilogExceptional != null) {
-            dataClasses.add(createCachedDataClass(model.epilogExceptional.operation.instruction, consts));
+            dataClasses.add(createCachedDataClass(model.epilogExceptional.operation.instruction(), consts));
         }
         consts.addElementsTo(this);
 
@@ -413,6 +416,9 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         if (model.loadIllegalLocalStrategy == LoadIllegalLocalStrategy.DEFAULT_VALUE) {
             CodeVariableElement var = this.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(Object.class), "DEFAULT_LOCAL_VALUE"));
             var.createInitBuilder().tree(DSLExpressionGenerator.write(model.defaultLocalValueExpression, null, Map.of()));
+        } else {
+            CodeVariableElement var = this.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(Object.class), "EXPECTED_FRAME_DESCRIPTOR_DEFAULT_VALUE"));
+            var.createInitBuilder().startStaticCall(types.FrameDescriptor, "newBuilder().defaultValueIllegal().build().getDefaultValue").end();
         }
 
         if (model.variadicStackLimitExpression != null) {
@@ -607,6 +613,11 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         }
         b.end(2);
 
+        String expectedFrameDescriptorValue = model.loadIllegalLocalStrategy == LoadIllegalLocalStrategy.DEFAULT_VALUE ? "DEFAULT_LOCAL_VALUE" : "EXPECTED_FRAME_DESCRIPTOR_DEFAULT_VALUE";
+        b.startIf().string("getFrameDescriptor().getDefaultValue() != ").string(expectedFrameDescriptorValue).end().startBlock();
+        b.startThrow().startNew(type(IllegalStateException.class)).doubleQuote("The frame descriptor default value must not be changed by the bytecode root node constructor.").end().end();
+        b.end();
+
         b.statement("this.nodes = nodes");
         b.statement("this.stackBase = stackBase");
         if (model.usesBoxingElimination()) {
@@ -758,23 +769,23 @@ public final class BytecodeRootNodeElement extends AbstractElement {
      * transition, and on continuation resumption (if enabled). The encoding is as follows:
      *
      * <pre>
-     * 00000000 00000000 SSSSSSSS SSSSSSSS BBBBBBBBB BBBBBBBBB BBBBBBBBB BBBBBBBBB
+     * SSSSSSSS SSSSSSSS SSSSSSSS SSSSSSSS BBBBBBBBB BBBBBBBBB BBBBBBBBB BBBBBBBBB
      * </pre>
      *
      * Where {@code B} represents the bci and {@code S} represents the sp.
      */
     static String encodeState(String bci, String sp) {
-        return String.format("((%s & 0xFFFFL) << 32) | (%s & 0xFFFFFFFFL)", sp, bci);
+        return String.format("((%s & 0xFFFFFFFFL) << 32) | (%s & 0xFFFFFFFFL)", sp, bci);
     }
 
     static final String RETURN_BCI = "0xFFFFFFFF";
 
     static String encodeReturnState(String sp) {
-        return String.format("((%s & 0xFFFFL) << 32) | %sL", sp, RETURN_BCI);
+        return String.format("((%s & 0xFFFFFFFFL) << 32) | %sL", sp, RETURN_BCI);
     }
 
     static String encodeNewBci(String bci, String state) {
-        return String.format("(%s & 0xFFFF00000000L) | (%s & 0xFFFFFFFFL)", state, bci);
+        return String.format("(%s & 0xFFFFFFFF00000000L) | (%s & 0xFFFFFFFFL)", state, bci);
     }
 
     static String decodeBci(String state) {
@@ -782,7 +793,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
     }
 
     static String decodeSp(String state) {
-        return String.format("(short) (%s >>> 32)", state);
+        return String.format("((int) (%s >>> 32))", state);
     }
 
     CodeTreeBuilder emitCastBytecodeIndexToInt(CodeTreeBuilder b) {
@@ -1222,32 +1233,52 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         if (executable != null) {
             return null;
         }
+
         CodeExecutableElement ex = GeneratorUtils.override(types.BytecodeRootNode, "getSource");
         ex.getModifiers().remove(Modifier.DEFAULT);
         ex.getModifiers().add(Modifier.FINAL);
         ex.getAnnotationMirrors().add(new CodeAnnotationMirror(types.CompilerDirectives_TruffleBoundary));
         CodeTreeBuilder b = ex.createBuilder();
 
-        b.declaration(arrayOf(type(int.class)), "info", "bytecode.sourceInfo");
+        b.declaration(sourceInfoTable.getSourceInfoType(), "info", "bytecode.sourceInfo");
         b.startIf().string("info == null || info.length == 0").end().startBlock();
         b.startReturn().string("null").end();
         b.end();
 
-        b.startDeclaration(type(int.class), "lastEntry");
-        b.string("info.length - ").variable(sourceInfoTable.entryLengthVariable);
-        b.end();
-        b.startIf();
-        b.tree(sourceInfoTable.loadStartBci("info", "lastEntry")).string(" == 0 &&").startIndention().newLine();
-        b.tree(sourceInfoTable.loadEndBci("info", "lastEntry")).string(" == bytecode.bytecodes.length").end();
-        b.end().startBlock();
-        b.startDeclaration(type(int.class), "sourceIndex");
-        b.tree(sourceInfoTable.loadSource("info", "lastEntry"));
-        b.end();
-        b.startReturn().string("bytecode.sources.get(sourceIndex)").end();
-        b.end(); // if
+        if (!model.enableCompressedSources) {
+            b.startDeclaration(type(int.class), "lastEntry");
+            b.string("info.length - ").variable(sourceInfoTable.entryLengthVariable);
+            b.end();
+            b.startIf();
+            b.tree(sourceInfoTable.loadStartBci("info", "lastEntry")).string(" == 0 &&").startIndention().newLine();
+            b.tree(sourceInfoTable.loadEndBci("info", "lastEntry")).string(" == bytecode.bytecodes.length").end();
+            b.end().startBlock();
+            b.startDeclaration(type(int.class), "sourceIndex");
+            b.tree(sourceInfoTable.loadSource("info", "lastEntry"));
+            b.end();
+            b.startReturn().string("bytecode.sources.get(sourceIndex)").end();
+            b.end(); // if
 
-        b.startReturn().string("null").end();
-        return ex;
+            b.startReturn().string("null").end();
+            return ex;
+        } else {
+            b.declaration(type(int.class), "lastEntry", "0");
+            SourceInfoTable.emitInitCompressedSourceIterationVariables(b, type(int.class), "index");
+            b.startWhile().string("index < info.length").end().startBlock();
+            b.statement("lastEntry = index");
+            b.statement("index += info[index] & 0xFF");
+            b.end();
+            b.statement("index = lastEntry + 1");
+            SourceInfoTable.emitDecodeVarintEntry(b, "info", "index");
+            b.declaration(type(int.class), "startBci", "(int) decoded");
+            SourceInfoTable.emitDecodeVarintEntry(b, "info", "index");
+            b.startIf().string("startBci == 0 && (int) decoded == bytecode.bytecodes.length").end().startBlock();
+            SourceInfoTable.emitDecodeVarintEntry(b, "info", "index");
+            b.startReturn().string("bytecode.sources.get((int) decoded)").end();
+            b.end();
+            b.startReturn().string("null").end();
+            return ex;
+        }
     }
 
     private CodeExecutableElement createGetSourceSection() {
@@ -1775,7 +1806,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         b.declaration(arrayOf(type(byte.class)), "copy", "Arrays.copyOf(original, original.length)");
 
         Map<Boolean, List<InstructionModel>> partitionedByIsQuickening = model.getInstructions().stream() //
-                        .sorted((e1, e2) -> e1.name.compareTo(e2.name)).collect(Collectors.partitioningBy(InstructionModel::isQuickening));
+                        .sorted(Comparator.comparing(InstructionModel::getName)).collect(Collectors.partitioningBy(InstructionModel::isQuickening));
 
         List<Entry<Integer, List<InstructionModel>>> regularGroupedByLength = partitionedByIsQuickening.get(false).stream() //
                         .collect(deterministicGroupingBy(InstructionModel::getInstructionLength)).entrySet() //
@@ -1988,7 +2019,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
             // we share execute methods with return type quickenings.
             return executeMethodName(instruction.quickeningBase, tier);
         }
-        return "execute" + instruction.getQualifiedQuickeningName() + (tier.isUncached() ? "$uncached" : "");
+        return "execute" + instruction.getQuickeningName() + (tier.isUncached() ? "$uncached" : "");
     }
 
     /**
@@ -2219,7 +2250,8 @@ public final class BytecodeRootNodeElement extends AbstractElement {
             List<InstructionModel> topLevelInstructions = new ArrayList<>();
             List<InstructionModel> partitionableInstructions = new ArrayList<>();
             for (InstructionModel instruction : instructions) {
-                if (instruction.kind != InstructionKind.CUSTOM || instruction.operation.kind == OperationKind.CUSTOM_YIELD) {
+                if (instruction.kind != InstructionKind.CUSTOM || instruction.operation.kind == OperationKind.CUSTOM_YIELD ||
+                                instruction.operation.kind == OperationKind.CUSTOM_RETURN) {
                     topLevelInstructions.add(instruction);
                 } else {
                     partitionableInstructions.add(instruction);
@@ -2320,6 +2352,10 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         return String.format("safeCastShort(%s)", value);
     }
 
+    static String safeCastUnsignedShort(String value) {
+        return String.format("safeCastUnsignedShort(%s)", value);
+    }
+
     // Helpers to generate common strings
     static CodeTree readInstruction(String bc, String bci) {
         CodeTreeBuilder b = CodeTreeBuilder.createBuilder();
@@ -2363,7 +2399,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
             case CONSTANT_LONG, CONSTANT_INT, CONSTANT_SHORT -> value;
             case CONSTANT_DOUBLE -> CodeTreeBuilder.createBuilder().startCall("Double.longBitsToDouble").tree(value).end().build();
             case CONSTANT_FLOAT -> CodeTreeBuilder.createBuilder().startCall("Float.intBitsToFloat").tree(value).end().build();
-            case CONSTANT_CHAR -> CodeTreeBuilder.createBuilder().startGroup().cast(type(char.class)).startParantheses().tree(value).string(" + " + (1 << 15)).end(2).build();
+            case CONSTANT_CHAR -> CodeTreeBuilder.createBuilder().startGroup().cast(type(char.class)).startParentheses().tree(value).string(" + " + (1 << 15)).end(2).build();
             case CONSTANT_BYTE -> CodeTreeBuilder.createBuilder().startGroup().cast(type(byte.class)).tree(value).end().build();
             case CONSTANT_BOOL -> CodeTreeBuilder.createBuilder().startGroup().tree(value).string(" != 0").end().build();
             default -> {
@@ -2372,18 +2408,41 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         };
     }
 
+    static CodeTree decodeRelativeBytecodeIndex(String bci, String rawOffset) {
+        CodeTreeBuilder b = CodeTreeBuilder.createBuilder();
+        b.startGroup();
+        b.string(rawOffset);
+        b.string(" == (byte) 0xff ? -1 : ");
+        b.string(bci);
+        b.string(" - ((0xff & ");
+        b.string(rawOffset);
+        b.string(") << 1)");
+        b.end();
+        return b.build();
+    }
+
     static CodeTree readImmediate(String bc, String bci, InstructionImmediate immediate) {
         return readImmediateWithOffset(bc, bci, immediate, immediate.offset());
     }
 
     static CodeTree readImmediateWithOffset(String bc, String bci, InstructionImmediate immediate, int offset) {
+        if (immediate.fixedValue().isPresent()) {
+            return immediate.fixedValue().get().tree();
+        }
+        if (!immediate.isEncoded()) {
+            throw new AssertionError("Tried to read an immediate that is neither fixed nor encoded in the instruction: " + immediate);
+        }
         CodeTreeBuilder b = CodeTreeBuilder.createBuilder();
         String accessor = switch (immediate.kind().width) {
+            case NONE -> throw new AssertionError("Non-encoded immediates cannot be read.");
             case BYTE -> "getByte";
             case SHORT -> "getShort";
             case INT -> "getIntUnaligned";
             case LONG -> "getLongUnaligned";
         };
+        if (immediate.kind().isUnsigned()) {
+            b.startParentheses();
+        }
         b.startCall("BYTES", accessor);
         b.string(bc);
         b.startGroup();
@@ -2397,6 +2456,10 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         b.startComment().string(" imm ", immediate.name(), " ").end();
         b.end();
         b.end();
+        if (immediate.kind().isUnsigned()) {
+            b.string(" & 0xffff");
+            b.end();
+        }
         return b.build();
     }
 
@@ -2413,8 +2476,12 @@ public final class BytecodeRootNodeElement extends AbstractElement {
     }
 
     static CodeTree writeImmediate(String bc, String bci, CodeTree value, InstructionImmediateEncoding immediate) {
+        if (immediate.width() == ImmediateWidth.NONE) {
+            throw new AssertionError("Non-encoded immediates cannot be written.");
+        }
         CodeTreeBuilder b = CodeTreeBuilder.createBuilder();
         String accessor = switch (immediate.width()) {
+            case NONE -> throw new AssertionError("Non-encoded immediates cannot be written.");
             case BYTE -> "putByte";
             case SHORT -> "putShort";
             case INT -> "putInt";
@@ -2485,6 +2552,10 @@ public final class BytecodeRootNodeElement extends AbstractElement {
 
     static String readShortSafe(String array, String index) {
         return String.format("SAFE_BYTES.getShort(%s, %s)", array, index);
+    }
+
+    static String readUnsignedShortSafe(String array, String index) {
+        return String.format("(SAFE_BYTES.getShort(%s, %s) & 0xffff)", array, index);
     }
 
     static String readByteSafe(String array, String index) {
@@ -2731,7 +2802,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
     CodeTree hasContinuationFrame(String frameName) {
         CodeTreeBuilder b = CodeTreeBuilder.createBuilder();
         if (model.loadIllegalLocalStrategy == LoadIllegalLocalStrategy.DEFAULT_VALUE) {
-            b.startParantheses();
+            b.startParentheses();
         }
         b.startCall(frameName, "isObject").string(BytecodeRootNodeElement.CONTINUATION_FRAME_INDEX).end();
         if (model.loadIllegalLocalStrategy == LoadIllegalLocalStrategy.DEFAULT_VALUE) {
@@ -2827,7 +2898,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
                     b.startNew("LocalVariableImpl");
                     b.tree(localBytecodeNode);
                     b.startGroup();
-                    b.startParantheses().tree(localIndex).end();
+                    b.startParentheses().tree(localIndex).end();
                     b.string(" * LOCALS_LENGTH");
                     b.end();
                     b.end();
@@ -2849,8 +2920,8 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         return switch (instr.kind) {
             case RETURN, YIELD, TAG_ENTER, TAG_LEAVE, TAG_LEAVE_VOID, TAG_RESUME, TAG_YIELD, TAG_YIELD_NULL -> true;
             case CUSTOM -> {
-                if (instr.operation.kind == OperationKind.CUSTOM_YIELD) {
-                    // custom yield always needs to set the bci
+                if (instr.operation.kind == OperationKind.CUSTOM_YIELD || instr.operation.kind == OperationKind.CUSTOM_RETURN) {
+                    // custom yield/return always need to set the bci
                     yield true;
                 }
                 CustomOperationModel custom = instr.operation.customModel;
@@ -2917,6 +2988,11 @@ public final class BytecodeRootNodeElement extends AbstractElement {
      * with the source info table.
      */
     final class SourceInfoTable {
+        /*
+         * A table entry needs enough attributes to encode all source section kinds. For suffix
+         * sections, an unresolved entry also needs two attributes to encode a link in the patch
+         * list (node id + table index).
+         */
         static final int NUM_ATTRIBUTES = Math.max(SourceSectionKind.MAX_ATTRIBUTES, 2);
 
         private final List<CodeVariableElement> constants;
@@ -2924,14 +3000,10 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         final CodeVariableElement sourceOffset;
         final CodeVariableElement startBciOffset;
         final CodeVariableElement endBciOffset;
-        /*
-         * A table entry needs enough attributes to encode all source section kinds. For suffix
-         * sections, an entry needs enough attributes to encode a link in the patch list (node id +
-         * table index).
-         */
         final List<CodeVariableElement> attributeOffsets;
         final int entryLength;
         final CodeVariableElement entryLengthVariable;
+        final ArrayType sourceInfoType;
 
         public final CodeExecutableElement createSourceSection;
 
@@ -2940,9 +3012,9 @@ public final class BytecodeRootNodeElement extends AbstractElement {
             // -1 is a valid value for some SourceSection constructors.
             this.unspecifiedAttribute = addConstant("UNSPECIFIED_ATTR", -2);
             int offset = 0;
-            this.sourceOffset = addConstant("OFFSET_SOURCE", offset++);
             this.startBciOffset = addConstant("OFFSET_START_BCI", offset++);
             this.endBciOffset = addConstant("OFFSET_END_BCI", offset++);
+            this.sourceOffset = addConstant("OFFSET_SOURCE", offset++);
             this.attributeOffsets = new ArrayList<>();
             for (int i = 0; i < NUM_ATTRIBUTES; i++) {
                 attributeOffsets.add(addConstant("OFFSET_ATTR" + (i + 1), offset++));
@@ -2950,7 +3022,15 @@ public final class BytecodeRootNodeElement extends AbstractElement {
             this.entryLength = offset;
             this.entryLengthVariable = addConstant("ENTRY_LENGTH", this.entryLength);
 
+            this.sourceInfoType = new CodeTypeMirror.ArrayCodeTypeMirror(type(model.enableCompressedSources ? byte.class : int.class));
             this.createSourceSection = BytecodeRootNodeElement.this.add(createCreateSourceSection());
+            if (model.enableCompressedSources) {
+                BytecodeRootNodeElement.this.add(createDecodeVarint());
+            }
+        }
+
+        public ArrayType getSourceInfoType() {
+            return this.sourceInfoType;
         }
 
         private CodeVariableElement addConstant(String name, int value) {
@@ -2963,17 +3043,30 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         private CodeExecutableElement createCreateSourceSection() {
             CodeExecutableElement ex = new CodeExecutableElement(Set.of(PRIVATE, STATIC), types.SourceSection, "createSourceSection");
             ex.addParameter(new CodeVariableElement(generic(List.class, types.Source), "sources"));
-            ex.addParameter(new CodeVariableElement(type(int[].class), "info"));
+            ex.addParameter(new CodeVariableElement(this.getSourceInfoType(), "info"));
             ex.addParameter(new CodeVariableElement(type(int.class), "index"));
 
             CodeTreeBuilder b = ex.createBuilder();
-            b.declaration(type(int.class), "sourceIndex", loadElement("info", "index", sourceOffset));
+            if (model.enableCompressedSources) {
+                emitInitCompressedSourceIterationVariables(b, type(int.class), "sourceInfoIndex", "index");
+                emitDecodeVarintEntry(b, "info", "sourceInfoIndex");
+                b.declaration(type(int.class), "sourceIndex", "(int) decoded");
+                emitDecodeVarintEntry(b, "info", "sourceInfoIndex");
+                b.declaration(type(int.class), "attr1", "(int) decoded - 2");
+                emitDecodeVarintEntry(b, "info", "sourceInfoIndex");
+                b.declaration(type(int.class), "attr2", "(int) decoded - 2");
+                emitDecodeVarintEntry(b, "info", "sourceInfoIndex");
+                b.declaration(type(int.class), "attr3", "(int) decoded - 2");
+                CodeTree decodedAttr4 = emitDecodeVarintEntry(b, "info", "sourceInfoIndex", null);
+                b.declaration(type(int.class), "attr4", CodeTreeBuilder.createBuilder().tree(decodedAttr4).string(" - 2").build());
+            } else {
+                b.declaration(type(int.class), "sourceIndex", loadElement("info", "index", sourceOffset));
+                b.declaration(type(int.class), "attr1", loadElement("info", "index", attributeOffsets.get(0)));
+                b.declaration(type(int.class), "attr2", loadElement("info", "index", attributeOffsets.get(1)));
+                b.declaration(type(int.class), "attr3", loadElement("info", "index", attributeOffsets.get(2)));
+                b.declaration(type(int.class), "attr4", loadElement("info", "index", attributeOffsets.get(3)));
+            }
             b.declaration(types.Source, "source", "sources.get(sourceIndex)");
-
-            b.declaration(type(int.class), "attr1", loadElement("info", "index", attributeOffsets.get(0)));
-            b.declaration(type(int.class), "attr2", loadElement("info", "index", attributeOffsets.get(1)));
-            b.declaration(type(int.class), "attr3", loadElement("info", "index", attributeOffsets.get(2)));
-            b.declaration(type(int.class), "attr4", loadElement("info", "index", attributeOffsets.get(3)));
 
             /*
              * The builder does not allow user-specified attributes to be all negative unless they
@@ -2995,6 +3088,43 @@ public final class BytecodeRootNodeElement extends AbstractElement {
             b.end();
 
             return ex;
+        }
+
+        private CodeExecutableElement createDecodeVarint() {
+            CodeExecutableElement ex = new CodeExecutableElement(Set.of(PRIVATE, STATIC), type(long.class), "decodeVarint");
+            ex.addParameter(new CodeVariableElement(arrayOf(type(byte.class)), "info"));
+            ex.addParameter(new CodeVariableElement(type(int.class), "index"));
+            CodeTreeBuilder b = ex.createBuilder();
+            b.declaration(type(int.class), "readIndex", "index");
+            b.declaration(type(int.class), "currentByte");
+            b.declaration(type(int.class), "encoded", "0");
+            b.startDoBlock();
+            b.statement("currentByte = info[readIndex++] & 0xFF");
+            b.statement("encoded = (encoded << 7) | (currentByte & 0x7F)");
+            b.end().startDoWhile().string("(currentByte & 0x80) != 0").end().end();
+            b.startReturn().string("((long) readIndex << 32) | (encoded & 0xFFFF_FFFFL)").end();
+            return ex;
+        }
+
+        static void emitInitCompressedSourceIterationVariables(CodeTreeBuilder b, TypeMirror intType, String indexVar) {
+            emitInitCompressedSourceIterationVariables(b, intType, indexVar, "0");
+        }
+
+        static void emitInitCompressedSourceIterationVariables(CodeTreeBuilder b, TypeMirror intType, String indexVar, String initialIndex) {
+            b.declaration(intType, indexVar, initialIndex);
+            b.declaration(ProcessorContext.getInstance().getType(long.class), "decoded");
+        }
+
+        static CodeTree emitDecodeVarintEntry(CodeTreeBuilder b, String sourceInfo, String indexVar) {
+            return emitDecodeVarintEntry(b, sourceInfo, indexVar, indexVar);
+        }
+
+        static CodeTree emitDecodeVarintEntry(CodeTreeBuilder b, String sourceInfo, String readIndexVar, String writeIndexVar) {
+            b.startAssign("decoded").startCall("decodeVarint").string(sourceInfo).string(readIndexVar).end().end();
+            if (writeIndexVar != null) {
+                b.startAssign(writeIndexVar).string("(int) (decoded >>> 32)").end();
+            }
+            return CodeTreeBuilder.createBuilder().string("(int) decoded").build();
         }
 
         void lazyInit() {

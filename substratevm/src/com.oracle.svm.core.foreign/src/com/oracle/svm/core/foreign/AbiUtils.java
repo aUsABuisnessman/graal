@@ -52,18 +52,18 @@ import org.graalvm.nativeimage.Platforms;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.BuildPhaseProvider.AfterAnalysis;
 import com.oracle.svm.core.SubstrateControlFlowIntegrity;
 import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.aarch64.SubstrateAArch64MacroAssembler;
 import com.oracle.svm.core.foreign.AbiUtils.Adapter.Adaptation;
 import com.oracle.svm.core.graal.code.AssignedLocation;
+import com.oracle.svm.core.graal.code.PreparedSignature;
+import com.oracle.svm.core.graal.code.PreparedSignature.ArgumentAdaptation;
 import com.oracle.svm.core.graal.code.SubstrateBackendWithAssembler;
-import com.oracle.svm.core.heap.UnknownPrimitiveField;
+import com.oracle.svm.guest.staging.core.heap.UnknownPrimitiveField;
+import com.oracle.svm.shared.BuildPhaseProvider.AfterAnalysis;
 import com.oracle.svm.shared.option.HostedOptionValues;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.Disallowed;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind.Duplicable;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
@@ -91,6 +91,7 @@ import jdk.internal.foreign.abi.CallingSequence;
 import jdk.internal.foreign.abi.LinkerOptions;
 import jdk.internal.foreign.abi.NativeEntryPoint;
 import jdk.internal.foreign.abi.SharedUtils;
+import jdk.internal.foreign.abi.StubLocations;
 import jdk.internal.foreign.abi.VMStorage;
 import jdk.internal.foreign.abi.aarch64.AArch64Architecture;
 import jdk.internal.foreign.abi.x64.X86_64Architecture;
@@ -528,8 +529,8 @@ public abstract class AbiUtils {
      * This method re-implements a part of the logic from the JDK so that we can get the callee-type
      * (i.e. the ABI low-level type) of a function from its descriptor.
      */
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+18/src/java.base/share/classes/jdk/internal/foreign/abi/AbstractLinker.java#L99")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+18/src/java.base/share/classes/jdk/internal/foreign/abi/DowncallLinker.java#L71-L85")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+18/src/java.base/share/classes/jdk/internal/foreign/abi/AbstractLinker.java#L99")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+18/src/java.base/share/classes/jdk/internal/foreign/abi/DowncallLinker.java#L71-L85")
     public final NativeEntryPointInfo makeNativeEntrypoint(FunctionDescriptor desc, LinkerOptions linkerOptions) {
         // From Linker.downcallHandle implemented in AbstractLinker.downcallHandle:
         // From AbstractLinker.downcallHandle0
@@ -550,8 +551,8 @@ public abstract class AbiUtils {
                         linkerOptions.allowsHeapAccess());
     }
 
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/AbstractLinker.java#L126")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+18/src/java.base/share/classes/jdk/internal/foreign/abi/UpcallLinker.java#L62-L110")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/AbstractLinker.java#L126")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+18/src/java.base/share/classes/jdk/internal/foreign/abi/UpcallLinker.java#L62-L110")
     public final JavaEntryPointInfo makeJavaEntryPoint(FunctionDescriptor desc, LinkerOptions linkerOptions) {
         // Linker.upcallStub implemented in AbstractLinker.upcallStub
         MethodType type = desc.toMethodType();
@@ -575,6 +576,60 @@ public abstract class AbiUtils {
      */
     public abstract AssignedLocation[] toMemoryAssignment(VMStorage[] moves, boolean forReturn);
 
+    /** Returns whether the storage represents a special location used by the up/downcall stub. */
+    abstract boolean isStubLocation(VMStorage storage);
+
+    /**
+     * Translates a JDK ABI storage into a {@link PreparedSignature} location for the interpreter
+     * native up/downcall stub. Register indices refer to locations in the platform-specific
+     * interpreter data, rather than to physical register encodings. For returns, {@code kind} is
+     * ignored and inferred from the storage.
+     */
+    final int toPreparedSignatureLocation(VMStorage storage, JavaKind kind, boolean forReturn, ArgumentAdaptation adaptation) {
+        if (isStubLocation(storage)) {
+            VMError.guarantee(!forReturn, "Unexpected stub location for a foreign return");
+            int stubLocationOrdinal = storage.indexOrOffset();
+            StubLocations[] stubLocations = StubLocations.values();
+            VMError.guarantee(stubLocationOrdinal >= 0 && stubLocationOrdinal < stubLocations.length, "Unexpected foreign downcall stub location");
+            StubLocations jdkStubLocation = stubLocations[stubLocationOrdinal];
+            int stubLocation = switch (jdkStubLocation) {
+                case TARGET_ADDRESS -> PreparedSignature.STUB_LOCATION_TARGET_ADDRESS;
+                case RETURN_BUFFER -> PreparedSignature.STUB_LOCATION_RETURN_BUFFER;
+                case CAPTURED_STATE_BUFFER -> PreparedSignature.STUB_LOCATION_CAPTURED_STATE_BUFFER;
+            };
+            return PreparedSignature.encodeStubLocation(stubLocation, adaptation);
+        }
+        return toPreparedSignatureStorageLocation(storage, kind, forReturn, adaptation);
+    }
+
+    protected abstract int toPreparedSignatureStorageLocation(VMStorage storage, JavaKind kind, boolean forReturn, ArgumentAdaptation adaptation);
+
+    static int toPreparedGpRegisterLocation(int index, JavaKind kind, boolean forReturn, ArgumentAdaptation adaptation) {
+        VMError.guarantee(!forReturn || adaptation == ArgumentAdaptation.NONE, "Unexpected adaptation for a foreign return");
+        JavaKind locationKind = forReturn || kind.isNumericFloat() ? JavaKind.Long : kind;
+        /*
+         * Floating-point arguments assigned to GP registers must be reinterpreted as raw integer
+         * bits before they can be stored in the register.
+         */
+        ArgumentAdaptation locationAdaptation = adaptation;
+        if (!forReturn && adaptation == ArgumentAdaptation.NONE) {
+            if (kind == JavaKind.Float) {
+                locationAdaptation = ArgumentAdaptation.FLOAT_TO_LONG;
+            } else if (kind == JavaKind.Double) {
+                locationAdaptation = ArgumentAdaptation.DOUBLE_TO_LONG;
+            }
+        }
+        return PreparedSignature.encodeArgumentType(locationKind, index, true, locationAdaptation);
+    }
+
+    /**
+     * Returns the byte offset from the outgoing stack pointer to the stack-argument area described
+     * by stack {@link VMStorage} offsets.
+     */
+    int outgoingStackArgumentBaseOffset() {
+        return 0;
+    }
+
     /**
      * Apply some ABI-specific transformations to an entrypoint (info) and arguments intended to be
      * used to call said entrypoint.
@@ -592,7 +647,7 @@ public abstract class AbiUtils {
     /**
      * Generate additional argument adaptations which are not done by HotSpot.
      */
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-24+27/src/java.base/share/classes/jdk/internal/foreign/abi/CallingSequenceBuilder.java#L103-L147")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-24+27/src/java.base/share/classes/jdk/internal/foreign/abi/CallingSequenceBuilder.java#L103-L147")
     @Platforms(Platform.HOSTED_ONLY.class)
     protected List<Adapter.Adaptation> generateAdaptations(NativeEntryPointInfo nep) {
         List<Adapter.Adaptation> adaptations = new ArrayList<>(Collections.nCopies(nep.methodType().parameterCount(), null));
@@ -632,7 +687,7 @@ public abstract class AbiUtils {
         return adaptations;
     }
 
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-24+27/src/java.base/share/classes/jdk/internal/foreign/abi/x64/sysv/CallArranger.java#L280-L290")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-24+27/src/java.base/share/classes/jdk/internal/foreign/abi/x64/sysv/CallArranger.java#L280-L290")
     @Platforms(Platform.HOSTED_ONLY.class)
     private static void handleCriticalWithHeapAccess(NativeEntryPointInfo nep, int i, List<Adaptation> adaptations, Adaptation adaptation) {
         VMError.guarantee(nep.allowHeapAccess(), "A storage may only be null when the Linker.Option.critical(true) option is passed.");
@@ -752,6 +807,16 @@ class ABIs {
         }
 
         @Override
+        boolean isStubLocation(VMStorage storage) {
+            return fail();
+        }
+
+        @Override
+        protected int toPreparedSignatureStorageLocation(VMStorage storage, JavaKind kind, boolean forReturn, ArgumentAdaptation adaptation) {
+            return fail();
+        }
+
+        @Override
         @Platforms(Platform.HOSTED_ONLY.class)
         protected List<Adapter.Adaptation> generateAdaptations(NativeEntryPointInfo nep) {
             return fail();
@@ -838,6 +903,36 @@ class ABIs {
         }
 
         @Override
+        boolean isStubLocation(VMStorage storage) {
+            return storage.type() == AArch64Architecture.StorageType.PLACEHOLDER;
+        }
+
+        @Override
+        protected final int toPreparedSignatureStorageLocation(VMStorage storage, JavaKind kind, boolean forReturn, ArgumentAdaptation adaptation) {
+            return switch (storage.type()) {
+                case AArch64Architecture.StorageType.INTEGER -> {
+                    int index = storage.indexOrOffset();
+                    VMError.guarantee(index >= 0 && index < (forReturn ? 2 : 9), "Unsupported AArch64 GP register assignment");
+                    yield AbiUtils.toPreparedGpRegisterLocation(index, kind, forReturn, adaptation);
+                }
+                case AArch64Architecture.StorageType.VECTOR -> {
+                    int index = storage.indexOrOffset();
+                    VMError.guarantee(index >= 0 && index < (forReturn ? 4 : 8), "Unsupported AArch64 FP register assignment");
+                    JavaKind locationKind = forReturn ? JavaKind.Double : kind;
+                    VMError.guarantee(adaptation == ArgumentAdaptation.NONE, "Unexpected adaptation for an AArch64 FP register");
+                    yield PreparedSignature.encodeArgumentType(locationKind, index, true, adaptation);
+                }
+                case AArch64Architecture.StorageType.STACK -> {
+                    if (forReturn) {
+                        throw unsupportedFeature("Unsupported AArch64 stack return assignment");
+                    }
+                    yield PreparedSignature.encodeArgumentType(kind, storage.indexOrOffset(), false, adaptation);
+                }
+                default -> throw unsupportedFeature("Unhandled VMStorage: " + storage);
+            };
+        }
+
+        @Override
         public Map<String, MemoryLayout> canonicalLayouts() {
             return SharedUtils.canonicalLayouts(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT);
         }
@@ -893,7 +988,7 @@ class ABIs {
             template.setTemplate(assembly, posIsolate, posMHArray, posCallTarget);
         }
 
-        @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/aarch64/CallArranger.java#L195")
+        @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/aarch64/CallArranger.java#L195")
         @Override
         public boolean dropReturn() {
             return true;
@@ -907,7 +1002,7 @@ class ABIs {
 
     @BasedOnJDKClass(jdk.internal.foreign.abi.aarch64.linux.LinuxAArch64Linker.class)
     @BasedOnJDKClass(jdk.internal.foreign.abi.aarch64.linux.LinuxAArch64CallArranger.class)
-    @SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
+    @SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Duplicable.class)
     static final class LinuxAArch64 extends ARM64 {
 
         @Override
@@ -999,6 +1094,63 @@ class ABIs {
         }
 
         @Override
+        boolean isStubLocation(VMStorage storage) {
+            return storage.type() == X86_64Architecture.StorageType.PLACEHOLDER;
+        }
+
+        @Override
+        protected final int toPreparedSignatureStorageLocation(VMStorage storage, JavaKind kind, boolean forReturn, ArgumentAdaptation adaptation) {
+            return switch (storage.type()) {
+                case X86_64Architecture.StorageType.INTEGER -> {
+                    Register register = AMD64.cpuRegisters.get(storage.indexOrOffset());
+                    assert register.name.equals(storage.debugName());
+                    int index = forReturn ? gpReturnIndex(register) : gpArgumentIndex(register);
+                    VMError.guarantee(index >= 0, "Unsupported AMD64 GP register assignment");
+                    yield AbiUtils.toPreparedGpRegisterLocation(index, kind, forReturn, adaptation);
+                }
+                case X86_64Architecture.StorageType.VECTOR -> {
+                    int index = storage.indexOrOffset();
+                    int count = forReturn ? 2 : fpArgumentRegisterCount();
+                    VMError.guarantee(index >= 0 && index < count, "Unsupported AMD64 FP register assignment");
+                    JavaKind locationKind = forReturn ? JavaKind.Double : kind;
+                    VMError.guarantee(adaptation == ArgumentAdaptation.NONE, "Unexpected adaptation for an AMD64 FP register");
+                    yield PreparedSignature.encodeArgumentType(locationKind, index, true, adaptation);
+                }
+                case X86_64Architecture.StorageType.STACK -> {
+                    if (forReturn) {
+                        throw unsupportedFeature("Unsupported AMD64 stack return assignment");
+                    }
+                    int stackOffset = outgoingStackArgumentBaseOffset() + storage.indexOrOffset();
+                    yield PreparedSignature.encodeArgumentType(kind, stackOffset, false, adaptation);
+                }
+                case X86_64Architecture.StorageType.X87 -> throw unsupportedFeature("Unsupported register kind: X87");
+                default -> throw unsupportedFeature("Unhandled VMStorage: " + storage);
+            };
+        }
+
+        protected abstract int gpArgumentIndex(Register register);
+
+        protected static int gpReturnIndex(Register register) {
+            if (register.equals(AMD64.rax)) {
+                return 0;
+            } else if (register.equals(AMD64.rdx)) {
+                return 1;
+            }
+            return -1;
+        }
+
+        protected abstract int fpArgumentRegisterCount();
+
+        protected static int indexOf(Register register, Register... orderedRegisters) {
+            for (int i = 0; i < orderedRegisters.length; i++) {
+                if (register.equals(orderedRegisters[i])) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        @Override
         public Registers upcallSpecialArgumentsRegisters() {
             return new Registers(AMD64.r10, AMD64.r11);
         }
@@ -1066,6 +1218,20 @@ class ABIs {
         }
 
         @Override
+        protected int gpArgumentIndex(Register register) {
+            /*
+             * The final location represents the synthetic SysV variadic argument. The AMD64
+             * interpreter native leave-data accessor maps it to the rax scratch slot.
+             */
+            return indexOf(register, AMD64.rdi, AMD64.rsi, AMD64.rdx, AMD64.rcx, AMD64.r8, AMD64.r9, AMD64.rax);
+        }
+
+        @Override
+        protected int fpArgumentRegisterCount() {
+            return 8;
+        }
+
+        @Override
         @Platforms(Platform.HOSTED_ONLY.class)
         protected List<Adapter.Adaptation> generateAdaptations(NativeEntryPointInfo nep) {
             var adaptations = super.generateAdaptations(nep);
@@ -1101,7 +1267,7 @@ class ABIs {
             return SharedUtils.canonicalLayouts(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT);
         }
 
-        @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/x64/sysv/CallArranger.java#L147")
+        @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/x64/sysv/CallArranger.java#L147")
         @Override
         public boolean dropReturn() {
             return true;
@@ -1115,7 +1281,7 @@ class ABIs {
 
     @BasedOnJDKClass(jdk.internal.foreign.abi.x64.windows.Windowsx64Linker.class)
     @BasedOnJDKClass(jdk.internal.foreign.abi.x64.windows.CallArranger.class)
-    @SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
+    @SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Duplicable.class)
     static final class Win64 extends X86_64 {
 
         @Platforms(Platform.HOSTED_ONLY.class) //
@@ -1124,6 +1290,22 @@ class ABIs {
         @Override
         protected CallingSequence makeCallingSequence(MethodType type, FunctionDescriptor desc, boolean forUpcall, LinkerOptions options) {
             return jdk.internal.foreign.abi.x64.windows.CallArranger.getBindings(type, desc, forUpcall, options).callingSequence();
+        }
+
+        @Override
+        int outgoingStackArgumentBaseOffset() {
+            /* The Win64 VMStorage offsets are relative to the area after the shadow space. */
+            return 4 * Long.BYTES;
+        }
+
+        @Override
+        protected int gpArgumentIndex(Register register) {
+            return indexOf(register, AMD64.rcx, AMD64.rdx, AMD64.r8, AMD64.r9);
+        }
+
+        @Override
+        protected int fpArgumentRegisterCount() {
+            return 4;
         }
 
         /**
@@ -1172,7 +1354,7 @@ class ABIs {
             return SharedUtils.canonicalLayouts(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_CHAR);
         }
 
-        @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/x64/windows/CallArranger.java#L139")
+        @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+13/src/java.base/share/classes/jdk/internal/foreign/abi/x64/windows/CallArranger.java#L139")
         @Override
         public boolean dropReturn() {
             return false;
@@ -1184,7 +1366,7 @@ class ABIs {
         }
     }
 
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+11/src/java.base/share/classes/jdk/internal/foreign/abi/DowncallLinker.java#L122-L140")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+11/src/java.base/share/classes/jdk/internal/foreign/abi/DowncallLinker.java#L122-L140")
     static class Downcalls {
         protected static Stream<Binding.VMStore> argMoveBindingsStream(CallingSequence callingSequence) {
             return callingSequence.argumentBindings()
@@ -1207,7 +1389,7 @@ class ABIs {
         }
     }
 
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+11/src/java.base/share/classes/jdk/internal/foreign/abi/UpcallLinker.java#L124-L134")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+11/src/java.base/share/classes/jdk/internal/foreign/abi/UpcallLinker.java#L124-L134")
     static class Upcalls {
         static Binding.VMLoad[] argMoveBindings(CallingSequence callingSequence) {
             return callingSequence.argumentBindings()

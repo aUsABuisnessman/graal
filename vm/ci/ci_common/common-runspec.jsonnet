@@ -25,7 +25,6 @@ local evaluate_late(key, object) = task_spec(run_spec.evaluate_late({key:object}
   local sulong = task_spec(graal_common.deps.sulong),
   local graalpy = task_spec(graal_common.deps.graalpy),
   local graalnodejs = task_spec(graal_common.deps.graalnodejs),
-  local fastr = task_spec(graal_common.deps.fastr),
 
   local timelimit(t) = evaluate_late('999_time_limit', { // the key starts with 999 to be the last one evaluated
     timelimit: t
@@ -76,9 +75,11 @@ local evaluate_late(key, object) = task_spec(run_spec.evaluate_late({key:object}
       ],
     },
 
-    local common_vm_linux = common_vm + {
+    local common_vm_linux_amd64 = common_vm + {
       capabilities+: ['manycores'],
     },
+
+    local common_vm_linux_aarch64 = common_vm,
 
     local common_vm_darwin = common_vm + {
       environment+: {
@@ -90,11 +91,11 @@ local evaluate_late(key, object) = task_spec(run_spec.evaluate_late({key:object}
     local common_vm_windows = common_vm + graal_common.windows_server_2016_amd64,
 
     "linux": {
-      "amd64": graal_common.linux_amd64 + common_vm_linux,
-      "aarch64": graal_common.linux_aarch64 + common_vm_linux,
+      "amd64": graal_common.linux_amd64 + common_vm_linux_amd64,
+      "aarch64": graal_common.linux_aarch64 + common_vm_linux_aarch64,
     },
     "ubuntu": {
-      "amd64": graal_common.linux_amd64_ubuntu + common_vm_linux,
+      "amd64": graal_common.linux_amd64_ubuntu + common_vm_linux_amd64,
     },
     "darwin": {
       "aarch64": graal_common.darwin_aarch64 + common_vm_darwin,

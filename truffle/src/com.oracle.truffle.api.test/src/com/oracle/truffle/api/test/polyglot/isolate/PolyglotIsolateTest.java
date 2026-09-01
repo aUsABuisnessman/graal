@@ -100,10 +100,6 @@ import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.stream.Collectors;
 
-import com.oracle.truffle.api.test.OSUtils;
-import com.oracle.truffle.api.test.ReflectionUtils;
-import com.oracle.truffle.api.test.TestAPIAccessor;
-import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 import org.graalvm.nativebridge.Isolate;
 import org.graalvm.nativebridge.IsolateThread;
 import org.graalvm.nativebridge.ProcessIsolate;
@@ -133,9 +129,13 @@ import com.oracle.truffle.api.interop.ArityException;
 import com.oracle.truffle.api.interop.InteropException;
 import com.oracle.truffle.api.interop.UnsupportedTypeException;
 import com.oracle.truffle.api.test.GCUtils;
+import com.oracle.truffle.api.test.OSUtils;
+import com.oracle.truffle.api.test.ReflectionUtils;
 import com.oracle.truffle.api.test.SubprocessTestUtils;
+import com.oracle.truffle.api.test.TestAPIAccessor;
 import com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest;
 import com.oracle.truffle.api.test.polyglot.PolyglotCachingTest;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 import com.oracle.truffle.tck.tests.ValueAssert;
 import com.oracle.truffle.tck.tests.ValueAssert.Trait;
 
@@ -456,6 +456,18 @@ public class PolyglotIsolateTest {
         context = Context.newBuilder().engine(engine).build();
         context.close(true);
         engine.close(true);
+    }
+
+    @Test
+    public void testToStringAfterClose() {
+        Engine engine = Engine.newBuilder().allowExperimentalOptions(true).option("engine.SpawnIsolate", "true").build();
+        Context context = Context.newBuilder().engine(engine).build();
+        assertNotNull(engine.toString());
+        assertNotNull(context.toString());
+        context.close();
+        assertNotNull(context.toString());
+        engine.close();
+        assertNotNull(engine.toString());
     }
 
     @Test
@@ -2256,6 +2268,51 @@ public class PolyglotIsolateTest {
             int guestToHostCallCount = 10_000;
             ctx.eval("triste", "loopHostCall(newHostObject(" + hostObjectFactory.newHostObject() + ")," + guestToHostCallCount + ")");
         }
+    }
+
+    @Test
+    public void testNoMethodScopingWarningWithoutIsolation() throws Exception {
+        testScopingWarningImpl(false, HostAccess.ALL, false, false);
+    }
+
+    @Test
+    public void testNoMethodScopingWarningForNoHostAccess() throws Exception {
+        testScopingWarningImpl(true, HostAccess.NONE, false, false);
+    }
+
+    @Test
+    public void testMethodScopingWarningForUnscopedHostAccess() throws Exception {
+        testScopingWarningImpl(true, HostAccess.ALL, false, true);
+    }
+
+    @Test
+    public void testNoMethodScopingWarningForScopedHostAccess() throws Exception {
+        HostAccess scopedHostAccess = HostAccess.newBuilder(HostAccess.ALL).methodScoping(true).build();
+        testScopingWarningImpl(true, scopedHostAccess, false, false);
+    }
+
+    @Test
+    public void testMethodScopingWarningDisabled() throws Exception {
+        testScopingWarningImpl(true, HostAccess.ALL, true, false);
+    }
+
+    private static void testScopingWarningImpl(boolean spawnIsolate, HostAccess hostAccess, boolean disableWarning, boolean expectWarning) throws Exception {
+        assumeFalse(ImageInfo.inImageRuntimeCode());
+        SubprocessTestUtils.Builder builder = SubprocessTestUtils.newBuilder(PolyglotIsolateTest.class, () -> {
+            Context context = Context.newBuilder("triste").allowHostAccess(hostAccess).spawnIsolate(spawnIsolate).build();
+            context.close();
+        });
+        // Remove engine.SpawnIsolate option passed by gates, the test controls spawn isolate itself
+        builder.prefixVmOption(SubprocessTestUtils.markForRemoval(("-Dpolyglot.engine.SpawnIsolate=true")));
+        if (disableWarning) {
+            builder.prefixVmOption("-Dpolyglot.engine.WarnMethodScoping=false");
+        } else {
+            builder.prefixVmOption(SubprocessTestUtils.markForRemoval(("-Dpolyglot.engine.WarnMethodScoping=false")));
+        }
+        builder.onExit((p) -> {
+            assertEquals(expectWarning, p.output.stream().anyMatch((l) -> l.contains("An isolated polyglot context uses host access without host method scoping.")));
+        });
+        builder.run();
     }
 
     @HostReflection

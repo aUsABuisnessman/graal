@@ -56,7 +56,6 @@ import org.graalvm.wasm.exception.WasmJsApiException;
 import org.graalvm.wasm.predefined.BuiltinModule;
 import org.graalvm.wasm.struct.WasmStructAccess;
 import org.graalvm.wasm.types.DefinedType;
-import org.graalvm.wasm.types.FunctionType;
 import org.graalvm.wasm.types.StructType;
 
 import com.oracle.truffle.api.CallTarget;
@@ -97,17 +96,19 @@ public final class WasmLanguage extends TruffleLanguage<WasmContext> {
     @CompilationFinal private volatile WasmContextOptions contextOptions;
 
     private final ContextThreadLocal<MultiValueStack> multiValueStackThreadLocal = locals.createContextThreadLocal(((context, thread) -> new MultiValueStack()));
+    private final ContextThreadLocal<ReturnCallData> returnCallDataContextThreadLocal = locals.createContextThreadLocal(((context, thread) -> new ReturnCallData()));
 
     private final Map<BuiltinModule, WasmModule> builtinModules = new ConcurrentHashMap<>();
 
     private final Map<DefinedType, Integer> equivalenceClasses = new ConcurrentHashMap<>();
     private final Map<Integer, WasmStructAccess> structAccessesByEquivalenceClass = new ConcurrentHashMap<>();
     private int nextEquivalenceClass = SymbolTable.FIRST_EQUIVALENCE_CLASS;
-    private final Map<FunctionType, CallTarget> interopCallAdapters = new ConcurrentHashMap<>();
+    private final Map<Integer, CallTarget> interopCallAdaptersByEquivalenceClass = new ConcurrentHashMap<>();
 
     /**
-     * Computes the equivalence class of a defined type. Every distinct defined type has a unique
-     * equivalence class and two defined types are equal iff their equivalence classes are equal.
+     * Computes the equivalence class of a top-level defined type. Every distinct top-level defined
+     * type has a unique equivalence class and two top-level defined types are equal iff their
+     * equivalence classes are equal.
      * <p>
      * These type equivalence classes are shared for all modules of all contexts in a given
      * {@link WasmLanguage} instance.
@@ -145,15 +146,18 @@ public final class WasmLanguage extends TruffleLanguage<WasmContext> {
     }
 
     /**
-     * Gets or creates the interop call adapter for a function type. Always returns the same call
-     * target for any particular type.
+     * Gets or creates the interop call adapter for a top-level function type. Always returns the
+     * same call target for equivalent types.
      */
-    public CallTarget interopCallAdapterFor(FunctionType type) {
+    public CallTarget interopCallAdapterFor(DefinedType type) {
         CompilerAsserts.neverPartOfCompilation();
-        CallTarget callAdapter = interopCallAdapters.get(type);
+        assert type.isFunctionType();
+        int equivalenceClass = type.typeEquivalenceClass();
+        assert equivalenceClass != SymbolTable.NO_EQUIVALENCE_CLASS;
+        CallTarget callAdapter = interopCallAdaptersByEquivalenceClass.get(equivalenceClass);
         if (callAdapter == null) {
-            callAdapter = interopCallAdapters.computeIfAbsent(type,
-                            k -> new InteropCallAdapterNode(this, k).getCallTarget());
+            callAdapter = interopCallAdaptersByEquivalenceClass.computeIfAbsent(equivalenceClass,
+                            k -> new InteropCallAdapterNode(this, type.asFunctionType()).getCallTarget());
         }
         return callAdapter;
     }
@@ -380,5 +384,14 @@ public final class WasmLanguage extends TruffleLanguage<WasmContext> {
                 size = expectedSize;
             }
         }
+    }
+
+    public ReturnCallData returnCallData() {
+        return returnCallDataContextThreadLocal.get();
+    }
+
+    public static final class ReturnCallData {
+        public CallTarget target = null;
+        public Object[] args = null;
     }
 }

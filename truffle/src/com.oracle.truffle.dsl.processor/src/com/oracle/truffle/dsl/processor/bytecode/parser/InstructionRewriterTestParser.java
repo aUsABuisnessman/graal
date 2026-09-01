@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -53,6 +53,9 @@ import javax.lang.model.type.DeclaredType;
 
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionPatternModel;
+import com.oracle.truffle.dsl.processor.bytecode.model.InstructionPatternModel.Binding;
+import com.oracle.truffle.dsl.processor.bytecode.model.InstructionPatternModel.ImmediatePattern;
+import com.oracle.truffle.dsl.processor.bytecode.model.InstructionPatternModel.Wildcard;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionRewriteRuleModel;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionRewriterModel;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.ImmediateKind;
@@ -144,13 +147,25 @@ public class InstructionRewriterTestParser extends AbstractParser<GenerateInstru
                         parseImmediates(instruction, instructionPatternMirror));
     }
 
-    private static String[] parseImmediates(InstructionModel instruction, AnnotationMirror instructionPatternMirror) {
+    private static ImmediatePattern[] parseImmediates(InstructionModel instruction, AnnotationMirror instructionPatternMirror) {
         List<String> immediates = ElementUtils.getAnnotationValueList(String.class, instructionPatternMirror, "immediates");
-        if (immediates.isEmpty() && !instruction.immediates.isEmpty()) {
-            return new String[instruction.immediates.size()];
-        } else {
-            return immediates.toArray(String[]::new);
+        if (immediates.isEmpty() && !instruction.getEncodedImmediates().isEmpty()) {
+            return createWildcards(instruction.getEncodedImmediates().size());
         }
+
+        ImmediatePattern[] result = new ImmediatePattern[immediates.size()];
+        for (int i = 0; i < result.length; i++) {
+            result[i] = new Binding(immediates.get(i));
+        }
+        return result;
+    }
+
+    private static ImmediatePattern[] createWildcards(int count) {
+        ImmediatePattern[] result = new ImmediatePattern[count];
+        for (int i = 0; i < result.length; i++) {
+            result[i] = new Wildcard();
+        }
+        return result;
     }
 
     public GenerateInstructionRewriterTemplate reportError(TypeElement templateType, AnnotationMirror annotation, String text, Object... params) {

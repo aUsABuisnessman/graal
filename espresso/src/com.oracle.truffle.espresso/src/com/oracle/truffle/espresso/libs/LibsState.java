@@ -29,12 +29,16 @@ import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
+import java.net.SocketOption;
+import java.net.StandardSocketOptions;
 import java.nio.channels.CancelledKeyException;
 import java.nio.channels.SelectableChannel;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -63,6 +67,11 @@ public class LibsState {
     private static final TruffleLogger logger = TruffleLogger.getLogger(EspressoLanguage.ID, LibsState.class);
 
     /**
+     * Generates handles for a TrufflePoller to access the host Selector.
+     */
+    private final StrongHandles<Selector> trufflePollerHandles = new StrongHandles<>();
+
+    /**
      * Generates handles for a TruffleSelector to access the host Selector.
      */
     private final StrongHandles<Selector> truffleSelectorHandles = new StrongHandles<>();
@@ -73,9 +82,20 @@ public class LibsState {
     private final ConcurrentHashMap<Long, SelectionKey> truffleSelectorSelectionKeys = new ConcurrentHashMap<>();
 
     /**
+     * Mapping from guestHandle and channelFD to SelectionKey for the TrufflePoller.
+     */
+
+    private final ConcurrentHashMap<Long, SelectionKey> trufflePollerSelectionKeys = new ConcurrentHashMap<>();
+
+    /**
      * Mapping from SelectionKey to id,fd pair for the TruffleSelector.
      */
     private final ConcurrentHashMap<SelectionKey, Long> truffleSelectorIdFd = new ConcurrentHashMap<>();
+
+    /**
+     * Mapping from SelectionKey to id,fd for the TrufflePoller.
+     */
+    private final ConcurrentHashMap<SelectionKey, Long> trufflePollerIdFd = new ConcurrentHashMap<>();
 
     private final EspressoContext context;
 
@@ -167,8 +187,8 @@ public class LibsState {
     }
 
     @TruffleBoundary
-    public void selectorPutSelectionKey(int id, int fd, SelectionKey selKey) {
-        long key = ((long) id << 32) | (fd & 0xFFFF_FFFFL);
+    public void selectorPutSelectionKey(int selectorId, int fd, SelectionKey selKey) {
+        long key = ((long) selectorId << 32) | (fd & 0xFFFF_FFFFL);
         SelectionKey previousSelKey = truffleSelectorSelectionKeys.put(key, selKey);
         Long previousIdFd = truffleSelectorIdFd.put(selKey, key);
         // sanity check: SelectionKey <==> (SelectorId,ChannelFD)
@@ -177,8 +197,8 @@ public class LibsState {
     }
 
     @TruffleBoundary
-    public SelectionKey selectorGetSelectionKey(int id, int fd) {
-        long key = ((long) id << 32) | (fd & 0xFFFF_FFFFL);
+    public SelectionKey selectorGetSelectionKey(int selectorId, int fd) {
+        long key = ((long) selectorId << 32) | (fd & 0xFFFF_FFFFL);
         return truffleSelectorSelectionKeys.get(key);
     }
 
@@ -246,9 +266,9 @@ public class LibsState {
     }
 
     @TruffleBoundary
-    public void selectorDeregister(int id, int fd) {
+    public void selectorDeregister(int selectorId, int fd) {
         // this is synchronized from outside per guest SelectionKey
-        long key = ((long) id << 32) | (fd & 0xFFFF_FFFFL);
+        long key = ((long) selectorId << 32) | (fd & 0xFFFF_FFFFL);
         SelectionKey selKey = truffleSelectorSelectionKeys.remove(key);
         if (selKey != null) {
             truffleSelectorIdFd.remove(selKey);
@@ -291,7 +311,6 @@ public class LibsState {
             Entry<Long, SelectionKey> entry = it.next();
             long key = entry.getKey();
 
-            // Correctly extract the high 32 bits
             int keySelectorId = (int) (key >>> 32);
 
             // If selectorId matches, yield all resources of the entry
@@ -304,6 +323,176 @@ public class LibsState {
                 }
             }
         }
+    }
+
+    /**
+     * Creates a host SelectorWrapper for the guest TrufflePoller and generates a handle for it.
+     *
+     * @return the handle
+     */
+    public long pollerHandlify() {
+        try {
+            return trufflePollerHandles.handlify(Selector.open());
+        } catch (IOException e) {
+            throw Throw.throwIOException(e, context);
+        }
+    }
+
+    /**
+     * Used for retrieving the TrufflePoller's host selector associated with the given id.
+     */
+    @TruffleBoundary
+    public Selector pollerGetHostSelector(int pollerId) {
+        Selector selector = trufflePollerHandles.getObject(pollerId);
+        checkSelector(selector);
+        return selector;
+    }
+
+    @TruffleBoundary
+    private void pollerPutSelectionKey(int pollerId, int fd, SelectionKey selKey) {
+        long key = ((long) pollerId << 32) | (fd & 0xFFFF_FFFFL);
+        SelectionKey previousSelKey = trufflePollerSelectionKeys.put(key, selKey);
+        Long previousIdFd = trufflePollerIdFd.put(selKey, key);
+        // sanity check: SelectionKey <==> (SelectorId,ChannelFD)
+        assert previousSelKey == null || previousSelKey == selKey;
+        assert previousIdFd == null || previousIdFd == key;
+    }
+
+    @TruffleBoundary
+    public SelectionKey pollerGetSelectionKey(int pollerId, int fd) {
+        long key = ((long) pollerId << 32) | (fd & 0xFFFF_FFFFL);
+        return trufflePollerSelectionKeys.get(key);
+    }
+
+    /**
+     * retrieves the fd associated with the SelectionKey for the TrufflePoller.
+     *
+     * @param key the SelectionKey
+     * @return the fd associated with the key or -1 if not found.
+     */
+    @TruffleBoundary
+    public int pollerSelectionKeyGetFd(SelectionKey key) {
+        Long idFd = trufflePollerIdFd.get(key);
+        if (idFd == null) {
+            return INVALID_FD;
+        }
+        // extract the fd (the lower 32 bits)
+        return (int) idFd.longValue();
+    }
+
+    /**
+     * Register fd with the pollerSelector or sets the interest ops of the corresponding
+     * SelectionKey for the TrufflePoller.
+     *
+     * @return false if the fd was already registered and the interestOps did not change. Returns
+     *         true otherwise.
+     */
+    @TruffleBoundary
+    public boolean pollerRegisterEvents(Selector pollerSelector, int pollerId, int fd, int ops, TruffleIO io) {
+        /*
+         * This is considered a benign race condition since at worst register returns the same
+         * selection key. Also note register will synchronize internally. Thus, we will not end up
+         * with mixed up internal state as pollerPutSelectionKey will always be called with exactly
+         * the same arguments.
+         */
+        SelectionKey key = pollerGetSelectionKey(pollerId, fd);
+        if (key != null) {
+            checkValidOps(key.channel(), ops);
+            if (key.interestOps() == ops) {
+                return false;
+            }
+            try {
+                key.interestOps(ops);
+            } catch (CancelledKeyException e) {
+                /*
+                 * The fd must have been closed, which canceled the SelectionKey and initiated
+                 * cleanUp. We only reach here if this method is called when the cleanUp has not yet
+                 * fully finished. This should be rare. Since the channel was closed and the key is
+                 * just waiting to be cleaned, it is safe to ignore this exception.
+                 */
+                return false;
+            }
+            return true;
+        } else {
+            // this internally checks if the fd is open
+            key = io.register(fd, pollerSelector, ops);
+            pollerPutSelectionKey(pollerId, fd, key);
+            if (!context.getTruffleIO().isOpen(fd)) {
+                /*
+                 * Race condition guard: we have registered a SelectionKey for a fd whose channel
+                 * was concurrently closed and is currently being cleaned up by
+                 * pollerCleanSelectionKey.
+                 *
+                 * isOpen(fd) is thread-safe here because the fd is backed by an
+                 * AbstractInterruptibleChannel, which stores its "closed" state in a volatile field
+                 * (which is only updated synchronously). Reading !isOpen(fd) == true is therefore a
+                 * reliable observation that the channel is closed.
+                 *
+                 * pollerCleanSelectionKey iterates a ConcurrentHashMap with a weakly consistent
+                 * iterator and may therefore miss the entry we just inserted via
+                 * pollerPutSelectionKey. Since we can confirm the channel is closed, we remove our
+                 * own entry to prevent a memory leak. See pollerCleanSelectionKey for more
+                 * information.
+                 */
+                long mapKey = ((long) pollerId << 32) | (fd & 0xFFFF_FFFFL);
+                trufflePollerSelectionKeys.remove(mapKey, key);
+                trufflePollerIdFd.remove(key, mapKey);
+            }
+            return true;
+        }
+    }
+
+    public void pollerCleanSelectionKey(int fdToClean) {
+        /*
+         * If we reach here we know the channel was closed and its SelectionKeys therefore canceled.
+         * Thus, we need to clean all resources associated with this fdToClean!
+         */
+        assert !context.getTruffleIO().isOpen(fdToClean);
+        /*
+         * Concurrent registration race: sun.nio.ch.Poller.poll may register new SelectionKeys for
+         * an already-closed channel, meaning another thread may call
+         * pollerPutSelectionKey(fdToClean, ...) while we iterate.
+         *
+         * Since ConcurrentHashMap provides only weakly consistent iteration, we may miss such a
+         * late entry. This is handled on the other side: after calling pollerPutSelectionKey, the
+         * registering thread re-checks isOpen(fd). Because AbstractInterruptibleChannel stores its
+         * closed state in a volatile field (which is only updated synchronously), this read
+         * reliably observes the closed state, and that thread removes its own entry. The two sides
+         * together cover all interleavings. Therefore, no entry with keyFd == fdToClean can remain
+         * after both sides have executed.
+         */
+        Iterator<Entry<Long, SelectionKey>> it = trufflePollerSelectionKeys.entrySet().iterator();
+        while (it.hasNext()) {
+            Entry<Long, SelectionKey> entry = it.next();
+            long key = entry.getKey();
+
+            int keyFd = (int) key;
+
+            // If keyFd == fdToClean, yield all resources of the entry
+            if (keyFd == fdToClean) {
+                SelectionKey sk = entry.getValue();
+                it.remove();
+                if (sk != null) {
+                    /*
+                     * We only reach here if the channel with fdToClean was closed and therefore
+                     * called java.nio.channels.spi.AbstractSelectableChannel#implCloseChannel()
+                     * which must have cancelled the selectionKey.
+                     *
+                     */
+                    assert !sk.isValid();
+                    trufflePollerIdFd.remove(sk);
+                }
+            }
+        }
+    }
+
+    /**
+     * Only used for testing.
+     *
+     * @return true if there are no registrations for the TrufflePoller
+     */
+    public boolean noPollerRegisterations() {
+        return trufflePollerSelectionKeys.isEmpty() && trufflePollerIdFd.isEmpty();
     }
 
     public final class LibsStateNet {
@@ -450,6 +639,68 @@ public class LibsState {
                 lMeta.net.java_net_Inet6Address$Inet6AddressHolder_scope_ifname.setObject(ipv6Holder, netIF);
             }
             return guestInetAddr;
+        }
+    }
+
+    /**
+     * Class for synchronizing platform-specific socket options between the host and the guest.
+     */
+    public static final class SocketOptionSync {
+        /*
+         * The guest encodes SocketOptions to ints in the platform-specific
+         * sun.nio.ch.SocketOptionRegistry.findOption. Those encodings are then provided to native
+         * get/set methods. In the substitutions of those methods in EspressoNoNative we have to
+         * decode the ints back to the original SocketOption. To ensure consistency between guest
+         * SocketOptions and host SocketOptions across platforms, we substitute findOption to use our
+         * custom encoding defined by this class.
+         */
+
+        // Defines all supported StandardSocketOptions. ExtendedSocketOptions are currently disabled GR-78554.
+        private static final SocketOption<?>[] intToOption = {
+                        StandardSocketOptions.SO_BROADCAST,
+                        StandardSocketOptions.SO_KEEPALIVE,
+                        StandardSocketOptions.SO_SNDBUF,
+                        StandardSocketOptions.SO_RCVBUF,
+                        StandardSocketOptions.SO_REUSEADDR,
+                        StandardSocketOptions.SO_REUSEPORT,
+                        StandardSocketOptions.SO_LINGER,
+                        StandardSocketOptions.IP_TOS,
+                        StandardSocketOptions.TCP_NODELAY,
+                        StandardSocketOptions.IP_MULTICAST_IF,
+                        StandardSocketOptions.IP_MULTICAST_TTL,
+                        StandardSocketOptions.IP_MULTICAST_LOOP
+        };
+        private static final Map<String, Integer> optionNameToInt = createOptionNameToInt();
+
+        private static Map<String, Integer> createOptionNameToInt() {
+            Map<String, Integer> result = new HashMap<>(intToOption.length);
+            for (int i = 0; i < intToOption.length; i++) {
+                String name = intToOption[i].name();
+                if (result.put(name, i) != null) {
+                    throw new IllegalStateException("Duplicate SocketOption name: " + name);
+                }
+            }
+            return result;
+        }
+
+        /**
+         * Retrieve the int encoding associated with the given name of the SocketOption.
+         *
+         * @param name the name associated with the SocketOption
+         * @return the encoding or -1 if the option was not found
+         */
+        public static int getInt(String name) {
+            return name == null ? -1 : optionNameToInt.getOrDefault(name, -1);
+        }
+
+        /**
+         * Retrieve the SocketOption associated with the given encoding.
+         *
+         * @param code the encoded SocketOption
+         * @return the SocketOption
+         */
+        public static SocketOption<?> getOption(int code) {
+            return intToOption[code];
         }
     }
 }

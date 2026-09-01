@@ -38,21 +38,21 @@ import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.core.Isolates;
-import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateOptions.ConcealedOptions;
-import com.oracle.svm.core.UnmanagedMemoryUtil;
+import com.oracle.svm.guest.staging.core.UnmanagedMemoryUtil;
 import com.oracle.svm.core.collections.RingBuffer;
 import com.oracle.svm.core.heap.Heap;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.heap.VMOperationInfos;
 import com.oracle.svm.core.locks.VMCondition;
 import com.oracle.svm.core.locks.VMMutex;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.core.stack.StackOverflowCheck;
 import com.oracle.svm.core.thread.VMThreads.SafepointBehavior;
 import com.oracle.svm.core.thread.VMThreads.StatusSupport;
-import com.oracle.svm.core.util.TimeUtils;
+import com.oracle.svm.shared.util.TimeUtils;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
@@ -159,7 +159,6 @@ public final class VMOperationControl {
 
         VMThreads.waitInNativeUntilDetached(get().dedicatedVMOperationThread.getIsolateThread());
         assert get().mainQueues.isEmpty();
-        assert VMThreads.firstThread().isNull() : "the VM operation thread must detach last";
     }
 
     /** Returns {@code true} if the current thread owns {@link #VM_OPERATION_MUTEX}. */
@@ -303,8 +302,7 @@ public final class VMOperationControl {
         }
     }
 
-    /** Check if it is okay for this thread to block. */
-    public static void guaranteeOkayToBlock(String message) {
+    public static boolean isOkayToBlock() {
         /*-
          * No Java synchronization must be performed within a VMOperation. Otherwise, one of the
          * following deadlocks could occur:
@@ -323,7 +321,11 @@ public final class VMOperationControl {
          */
         VMOperationControl control = VMOperationControl.get();
         OpInProgress opInProgress = control.getInProgress();
-        if (VMOperation.isInProgress(opInProgress)) {
+        return !VMOperation.isInProgress(opInProgress);
+    }
+
+    public static void guaranteeOkayToBlock(String message) {
+        if (!isOkayToBlock()) {
             Log.log().string(message).newline();
             throw VMError.shouldNotReachHere("Should not reach here: Not okay to block.");
         }

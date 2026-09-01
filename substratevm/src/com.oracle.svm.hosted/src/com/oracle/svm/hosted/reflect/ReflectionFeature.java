@@ -24,6 +24,7 @@
  */
 package com.oracle.svm.hosted.reflect;
 
+import com.oracle.svm.hosted.DeleteGuestValue;
 import java.lang.invoke.MethodHandle;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
@@ -41,7 +42,6 @@ import org.graalvm.nativeimage.c.function.CFunctionPointer;
 import org.graalvm.nativeimage.dynamicaccess.AccessCondition;
 import org.graalvm.nativeimage.hosted.Feature;
 import org.graalvm.nativeimage.hosted.RuntimeReflection;
-import org.graalvm.nativeimage.impl.AnnotationExtractor;
 import org.graalvm.nativeimage.impl.ReflectionIntrospector;
 import org.graalvm.nativeimage.impl.RuntimeJNIAccessSupport;
 import org.graalvm.nativeimage.impl.RuntimeProxyRegistrySupport;
@@ -56,10 +56,9 @@ import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.AnalysisUniverse;
 import com.oracle.svm.configure.ConfigurationFile;
 import com.oracle.svm.configure.ReflectionConfigurationParser;
-import com.oracle.svm.core.BuildPhaseProvider;
+import com.oracle.svm.shared.BuildPhaseProvider;
 import com.oracle.svm.core.ParsingReason;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.configure.ConfigurationFiles;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.fieldvaluetransformer.FieldValueTransformerWithAvailability;
@@ -80,7 +79,6 @@ import com.oracle.svm.hosted.FeatureImpl.DuringAnalysisAccessImpl;
 import com.oracle.svm.hosted.FeatureImpl.DuringSetupAccessImpl;
 import com.oracle.svm.hosted.ImageClassLoader;
 import com.oracle.svm.hosted.analysis.Inflation;
-import com.oracle.svm.hosted.annotation.SubstrateAnnotationExtractor;
 import com.oracle.svm.hosted.classinitialization.ClassInitializationSupport;
 import com.oracle.svm.hosted.classloading.ClassRegistryFeature;
 import com.oracle.svm.hosted.code.FactoryMethodSupport;
@@ -100,7 +98,6 @@ import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.ModuleSupport;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.util.AnnotationUtil;
 import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.JVMCIReflectionUtil;
 import com.oracle.svm.util.OriginalFieldProvider;
@@ -319,12 +316,17 @@ public class ReflectionFeature implements InternalFeature, ReflectionSubstitutio
     }
 
     @Override
+    public void onRegistration(OnRegistrationAccess access) {
+        ImageSingletons.add(ReflectionFeature.class, this);
+    }
+
+    @Override
     public void afterRegistration(AfterRegistrationAccess access) {
         ModuleSupport.accessPackagesToClass(ModuleSupport.Access.OPEN, null, false, "java.base", "jdk.internal.reflect");
 
         ImageSingletons.add(ReflectionSubstitutionSupport.class, this);
 
-        reflectionData = new ReflectionDataBuilder((SubstrateAnnotationExtractor) ImageSingletons.lookup(AnnotationExtractor.class));
+        reflectionData = new ReflectionDataBuilder();
         ImageSingletons.add(RuntimeReflectionSupport.class, reflectionData);
         ImageSingletons.add(ReflectionHostedSupport.class, reflectionData);
 
@@ -464,7 +466,7 @@ public class ReflectionFeature implements InternalFeature, ReflectionSubstitutio
     @Override
     public String getDeletionReason(Field reflectionField) {
         ResolvedJavaField field = metaAccess.lookupJavaField(reflectionField);
-        Delete annotation = AnnotationUtil.getAnnotation(field, Delete.class);
+        DeleteGuestValue annotation = DeleteGuestValue.get(field);
         return annotation != null ? annotation.value() : null;
     }
 

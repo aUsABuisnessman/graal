@@ -28,8 +28,8 @@ import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 
 import com.oracle.svm.core.heap.GCCause;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
-import com.oracle.svm.core.util.AbstractImageHeapList;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.util.AbstractImageHeapList;
 
 public class JfrGCCauseSerializer implements JfrSerializer {
     @Platforms(Platform.HOSTED_ONLY.class)

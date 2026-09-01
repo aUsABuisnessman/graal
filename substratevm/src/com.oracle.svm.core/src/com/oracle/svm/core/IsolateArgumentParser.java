@@ -55,13 +55,16 @@ import com.oracle.svm.core.graal.RuntimeCompilation;
 import com.oracle.svm.core.headers.LibC;
 import com.oracle.svm.core.imagelayer.BuildingImageLayerPredicate;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
-import com.oracle.svm.core.memory.UntrackedNullableNativeMemory;
-import com.oracle.svm.core.option.RuntimeOptionKey;
-import com.oracle.svm.core.option.RuntimeOptionParser;
-import com.oracle.svm.core.util.ImageHeapList;
+import com.oracle.svm.guest.staging.ArgsSupport;
+import com.oracle.svm.guest.staging.SubstrateGCOptions;
 import com.oracle.svm.guest.staging.c.CGlobalData;
 import com.oracle.svm.guest.staging.c.CGlobalDataFactory;
 import com.oracle.svm.guest.staging.c.function.CEntryPointCreateIsolateParameters;
+import com.oracle.svm.guest.staging.core.UnmanagedMemoryUtil;
+import com.oracle.svm.guest.staging.core.memory.UntrackedNullableNativeMemory;
+import com.oracle.svm.guest.staging.option.RuntimeOptionKey;
+import com.oracle.svm.guest.staging.option.RuntimeOptionParser;
+import com.oracle.svm.guest.staging.util.ImageHeapList;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.shared.singletons.ImageSingletonLoader;
@@ -89,9 +92,10 @@ import jdk.graal.compiler.options.OptionKey;
  * <p>
  * Non-null string defaults are stored as {@link #encodeDefaultStringOffset encoded offsets} into a
  * static table of null-terminated ASCII strings (see {@link #getDefaultStrings()}). During startup,
- * strings are copied to native memory so that slots contain regular {@link CCharPointer} values
- * that are owned by this parser. String default values are restricted to ASCII to avoid issues
- * ({@code argv} values use the runtime platform encoding).
+ * strings are resolved to regular {@link CCharPointer} values. If command line argument parsing is
+ * enabled, strings are copied to native memory and owned by this parser. Otherwise, string values
+ * point directly into the static default string table. String default values are restricted to
+ * ASCII to avoid issues ({@code argv} values use the runtime platform encoding).
  */
 @AutomaticallyRegisteredImageSingleton
 @SingletonTraits(access = AllAccess.class, layeredCallbacks = SingleLayer.class, layeredInstallationKind = InitialLayerOnly.class)
@@ -122,6 +126,7 @@ public class IsolateArgumentParser {
     private static final long T = K * G;
 
     private boolean isCompilationIsolate;
+    private boolean ownsStringArguments;
 
     @Platforms(Platform.HOSTED_ONLY.class)
     public IsolateArgumentParser() {
@@ -282,10 +287,14 @@ public class IsolateArgumentParser {
     public void parse(CEntryPointCreateIsolateParameters parameters, IsolateArguments arguments) {
         initialize(arguments, parameters);
 
-        if (LibC.isSupported() && shouldParseArguments(arguments)) {
+        boolean parseArguments = LibC.isSupported() && shouldParseArguments(arguments);
+        arguments.setOwnsStringArguments(parseArguments);
+
+        if (parseArguments) {
             CLongPointer value = StackValue.get(Long.BYTES);
             // Ignore the first argument as it represents the executable file name.
-            for (int i = 1; i < arguments.getArgc(); i++) {
+            int parseLimit = isolateArgumentParseLimit(parameters, arguments);
+            for (int i = 1; i < parseLimit; i++) {
                 CCharPointer arg = arguments.getArgv().read(i);
                 if (arg.isNonNull()) {
                     CCharPointer tail = matchPrefix(arg);
@@ -304,22 +313,52 @@ public class IsolateArgumentParser {
             }
         }
 
-        copyStringArguments(arguments);
+        materializeStringArguments(arguments);
+    }
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    private static int isolateArgumentParseLimit(CEntryPointCreateIsolateParameters parameters, IsolateArguments arguments) {
+        if (!SubstrateOptions.StrictRuntimeJavaOptions.getValue() || parameters.isNull() || parameters.version() < 4 || !parameters.getForJavaMainCall()) {
+            return arguments.getArgc();
+        }
+
+        for (int i = 1; i < arguments.getArgc(); i++) {
+            CCharPointer arg = arguments.getArgv().read(i);
+            if (arg.isNonNull() && ArgsSupport.isEndOfOptionsMarker(arg)) {
+                return i;
+            }
+        }
+        return arguments.getArgc();
     }
 
     @Uninterruptible(reason = "Tear-down in progress.")
     public boolean tearDown(IsolateArguments arguments) {
-        for (int i = 0; i < getOptionCount(); i++) {
-            if (OPTION_TYPES.get().read(i) == OptionValueType.C_CHAR_POINTER) {
-                UntrackedNullableNativeMemory.free(readCCharPointer(arguments, i));
-                writeCCharPointer(arguments, i, Word.nullPointer());
-            }
+        if (arguments.getOwnsStringArguments()) {
+            freeStringArguments(arguments);
         }
         return true;
     }
 
     @Uninterruptible(reason = "Tear-down in progress.")
     public boolean tearDown() {
+        if (ownsStringArguments) {
+            freeStringArguments();
+        }
+        return true;
+    }
+
+    @Uninterruptible(reason = "Tear-down in progress.")
+    private static void freeStringArguments(IsolateArguments arguments) {
+        for (int i = 0; i < getOptionCount(); i++) {
+            if (OPTION_TYPES.get().read(i) == OptionValueType.C_CHAR_POINTER) {
+                UntrackedNullableNativeMemory.free(readCCharPointer(arguments, i));
+                writeCCharPointer(arguments, i, Word.nullPointer());
+            }
+        }
+    }
+
+    @Uninterruptible(reason = "Tear-down in progress.")
+    private void freeStringArguments() {
         for (int i = 0; i < getOptionCount(); i++) {
             if (OPTION_TYPES.get().read(i) == OptionValueType.C_CHAR_POINTER) {
                 UntrackedNullableNativeMemory.free(Word.pointer(parsedOptionValues[i]));
@@ -327,7 +366,6 @@ public class IsolateArgumentParser {
                 parsedOptionNullFlags[i] = true;
             }
         }
-        return true;
     }
 
     /**
@@ -345,14 +383,16 @@ public class IsolateArgumentParser {
     }
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    private static void copyStringArguments(IsolateArguments arguments) {
+    private static void materializeStringArguments(IsolateArguments arguments) {
         for (int i = 0; i < getOptionCount(); i++) {
             if (OPTION_TYPES.get().read(i) == OptionValueType.C_CHAR_POINTER) {
                 if (!IsolateArgumentAccess.isNull(arguments, i)) {
                     CCharPointer string = getStringArgument(arguments, i);
-                    CCharPointer copy = duplicateCString(string);
-                    VMError.guarantee(copy.isNonNull(), "Copying of string argument failed.");
-                    writeCCharPointer(arguments, i, copy);
+                    if (arguments.getOwnsStringArguments()) {
+                        string = duplicateCString(string);
+                        VMError.guarantee(string.isNonNull(), "Copying of string argument failed.");
+                    }
+                    writeCCharPointer(arguments, i, string);
                 } else {
                     writeCCharPointer(arguments, i, Word.nullPointer());
                 }
@@ -407,17 +447,8 @@ public class IsolateArgumentParser {
     /// [RuntimeOptionParser#parseAndConsumeAllOptions].
     @Uninterruptible(reason = "Thread state not yet set up.")
     public static boolean shouldParseArguments(IsolateArguments arguments) {
-        if (SubstrateOptions.ParseRuntimeOptions.getValue()) {
-            return true;
-        } else if (RuntimeCompilation.isEnabled() && SubstrateOptions.supportCompileInIsolates()) {
-            return isCompilationIsolate(arguments);
-        }
-        return false;
-    }
-
-    @Uninterruptible(reason = "Thread state not yet set up.")
-    private static boolean isCompilationIsolate(IsolateArguments arguments) {
-        return arguments.getIsCompilationIsolate();
+        return SubstrateOptions.ParseRuntimeOptions.getValue() ||
+                        RuntimeCompilation.isEnabled() && SubstrateOptions.SupportCompileInIsolates.getValue() && arguments.getIsCompilationIsolate();
     }
 
     /**
@@ -427,7 +458,8 @@ public class IsolateArgumentParser {
      */
     @Uninterruptible(reason = "Thread state not yet set up.")
     public void persistOptions(IsolateArguments arguments) {
-        isCompilationIsolate = isCompilationIsolate(arguments);
+        isCompilationIsolate = arguments.getIsCompilationIsolate();
+        ownsStringArguments = arguments.getOwnsStringArguments();
 
         for (int i = 0; i < getOptionCount(); i++) {
             parsedOptionValues[i] = IsolateArgumentAccess.readRawUnchecked(arguments, i);

@@ -24,11 +24,10 @@
  */
 package com.oracle.svm.interpreter.metadata;
 
-import static com.oracle.svm.core.BuildPhaseProvider.AfterAnalysis;
+import static com.oracle.svm.shared.BuildPhaseProvider.AfterAnalysis;
 import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
-import java.io.IOException;
-import java.io.InputStream;
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -41,32 +40,30 @@ import org.graalvm.word.WordBase;
 import com.oracle.svm.core.StaticFieldsSupport;
 import com.oracle.svm.core.graal.meta.KnownOffsets;
 import com.oracle.svm.core.graal.snippets.OpenTypeWorldDispatchTableSnippets;
-import com.oracle.svm.core.heap.UnknownObjectField;
+import com.oracle.svm.guest.staging.core.heap.UnknownObjectField;
 import com.oracle.svm.core.hub.DynamicHub;
-import com.oracle.svm.core.hub.registry.ClassRegistries;
 import com.oracle.svm.core.hub.registry.SymbolsSupport;
-import com.oracle.svm.espresso.classfile.ClassfileParser;
-import com.oracle.svm.espresso.classfile.ClassfileStream;
-import com.oracle.svm.espresso.classfile.ParserException;
+import com.oracle.svm.core.stack.StackOverflowCheck;
 import com.oracle.svm.espresso.classfile.ParserKlass;
-import com.oracle.svm.espresso.classfile.attributes.PermittedSubclassesAttribute;
 import com.oracle.svm.espresso.classfile.descriptors.ByteSequence;
 import com.oracle.svm.espresso.classfile.descriptors.Name;
 import com.oracle.svm.espresso.classfile.descriptors.Symbol;
 import com.oracle.svm.espresso.classfile.descriptors.Type;
 import com.oracle.svm.espresso.classfile.descriptors.TypeSymbols;
-import com.oracle.svm.espresso.classfile.descriptors.ValidationException;
 import com.oracle.svm.espresso.shared.meta.TypeAccess;
+import com.oracle.svm.espresso.shared.vtable.VTable;
 import com.oracle.svm.interpreter.metadata.serialization.VisibleForSerialization;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.singletons.MultiLayeredImageSingleton;
 import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.util.OriginalClassProvider;
 
+import jdk.vm.ci.meta.Assumptions;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.JavaType;
 import jdk.vm.ci.meta.ResolvedJavaRecordComponent;
+import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
 /**
@@ -92,17 +89,152 @@ public class InterpreterResolvedObjectType extends InterpreterResolvedJavaType {
 
     private final String sourceFileName;
 
-    public static class VTableHolder {
+    /** Lazily allocated state whose lifetime follows this class metadata object. */
+    private RuntimeClassHierarchyState runtimeClassHierarchyState;
+
+    /** Returns this type's runtime hierarchy state, creating it while the hierarchy lock is held. */
+    final RuntimeClassHierarchyState getOrCreateRuntimeClassHierarchyState() {
+        if (runtimeClassHierarchyState == null) {
+            runtimeClassHierarchyState = new RuntimeClassHierarchyState();
+        }
+        return runtimeClassHierarchyState;
+    }
+
+    /** Returns the existing runtime hierarchy state, or {@code null} if none has been needed. */
+    final RuntimeClassHierarchyState getRuntimeClassHierarchyState() {
+        return runtimeClassHierarchyState;
+    }
+
+    @Override
+    public Assumptions.AssumptionResult<ResolvedJavaType> findLeafConcreteSubtype() {
+        if (isLeaf()) {
+            return new Assumptions.AssumptionResult<>(this);
+        }
+        if (isArray()) {
+            ResolvedJavaType elementalType = getElementalType();
+            Assumptions.AssumptionResult<ResolvedJavaType> elementResult = elementalType.findLeafConcreteSubtype();
+            if (elementResult != null && elementResult.getResult().equals(elementalType)) {
+                Assumptions.AssumptionResult<ResolvedJavaType> result = new Assumptions.AssumptionResult<>(this);
+                result.add(elementResult);
+                return result;
+            }
+            return null;
+        }
+        return RuntimeLoadedClassHierarchy.findLeafConcreteSubtype(this);
+    }
+
+    @Override
+    public ResolvedJavaType getSingleImplementor() {
+        return RuntimeLoadedClassHierarchy.getSingleImplementor(this);
+    }
+
+    @Override
+    public Assumptions.AssumptionResult<ResolvedJavaMethod> findUniqueConcreteMethod(ResolvedJavaMethod method) {
+        if (method instanceof InterpreterResolvedJavaMethod interpreterMethod) {
+            return RuntimeLoadedClassHierarchy.findUniqueConcreteMethod(this, interpreterMethod);
+        }
+        return null;
+    }
+
+    /**
+     * Holds the interpreter-side dispatch table for this type.
+     * <p>
+     * <h2>Classes</h2>
+     * For non-interface classes, this dispatch table consists of 4 parts:
+     * <ul>
+     * <li>The inherited superclass vtable. Entries in this part may be overridden by this class'
+     * declared method if applicable.</li>
+     * <li>The {@link VTable#isVirtualEntry virtual} declared methods of the current
+     * class. Some of these declared methods may not be appended, if they override a method in the
+     * super's table that has equivalent access control.</li>
+     * <li>The implicit interface methods, which are methods declared in any superinterface (or their
+     * superinterfaces) that are not implemented by this class or its superclasses.</li>
+     * <li>The concatenated interface tables.</li>
+     * </ul>
+     * <p>
+     * The dispatch table for non-interface classes therefore has this shape:
+     *
+     * <pre>
+     * index:  0        superLen      mirandaMethodsStart   classVtableLength      vtable.length
+     *         |           |                   |                     |                   |
+     *         v           v                   v                     v                   v
+     *         +-----------+-------------------+---------------------+-------------------+
+     *         | super's   | holder's declared | implicit interface  | concatenated      |
+     *         | class     | methods appended  | methods appended    | itables           |
+     *         | vtable    | to class vtable   | to class vtable     |                   |
+     *         +-----------+-------------------+---------------------+-------------------+
+     *
+     * superLen = holder.getSuperClass().getClassVtableLength()
+     * </pre>
+     * <p>
+     * Note: Entries in the mirandas or the itables may be {@code failing} methods if the selection
+     * logic should fail. These are synthetic internal methods that we create to represent such
+     * failures, and are methods that immediately throw. Though such methods advertise this holder as
+     * their declaring class, they do not appear in the declared methods array.
+     * <p>
+     * <h2>Interfaces</h2>
+     * For interfaces, the table holds the interface dispatch table prototype rather than a class
+     * vtable plus itables layout.
+     * <p>
+     * Here is its shape:
+     *
+     * <pre>
+     * index:  0                                    vtable.length
+     *         |                                          |
+     *         v                                          v
+     *         +------------------------------------------+
+     *         | holder's declared | failing implicit     |
+     *         | methods appended  | interface methods    |
+     *         | to table          | appended to table    |
+     *         +------------------------------------------+
+     *
+     * classVtableLength == 0
+     * mirandaMethodsStart == UNKNOWN
+     * </pre>
+     * <p>
+     * Note: Interfaces do not expose the concept of implicit interface methods, but a selection
+     * conflict may still arise from their superinterfaces. In this particular case, like for the
+     * concrete class case, we create a synthetic internal method that we add to the declared methods
+     * and the dispatch table prototype.
+     * <p>
+     * Unlike for concrete classes, such failing methods do appear in the declared methods of
+     * interfaces, such that they can be found and selected for {@code INVOKESPECIAL} call sites.
+     * These entries are however marked as {@link InterpreterResolvedJavaMethod#isInternal()
+     * internal}, such that they cannot be reflected upon.
+     */
+    public static class VTableHolder extends AbstractList<InterpreterResolvedJavaMethod> {
+        public static final int UNKNOWN = -1;
+
         @UnknownObjectField(availability = AfterAnalysis.class) //
         public InterpreterResolvedObjectType holder;
         @UnknownObjectField(availability = AfterAnalysis.class) //
         public InterpreterResolvedJavaMethod[] vtable;
-        public int classVtableLength;
 
-        public VTableHolder(InterpreterResolvedObjectType holder, InterpreterResolvedJavaMethod[] vtable, int classVtableLength) {
+        public int classVtableLength;
+        public int mirandaMethodsStart;
+
+        public VTableHolder(InterpreterResolvedObjectType holder, InterpreterResolvedJavaMethod[] vtable, int classVtableLength, int mirandaMethodsStart) {
             this.holder = holder;
             this.vtable = vtable;
             this.classVtableLength = classVtableLength;
+            this.mirandaMethodsStart = mirandaMethodsStart;
+        }
+
+        @Override
+        public InterpreterResolvedJavaMethod get(int index) {
+            return vtable[index];
+        }
+
+        @Override
+        public int size() {
+            return vtable.length;
+        }
+
+        public List<InterpreterResolvedJavaMethod> getImplicitInterfaceMethodsList() {
+            if (mirandaMethodsStart == UNKNOWN) {
+                return null;
+            }
+            return subList(mirandaMethodsStart, classVtableLength);
         }
     }
 
@@ -175,7 +307,7 @@ public class InterpreterResolvedObjectType extends InterpreterResolvedJavaType {
                     String sourceFileName) {
         Symbol<Type> type = CremaTypeAccess.jvmciNameToType(name);
         return new InterpreterResolvedObjectType(originalType, type, modifiers, componentType, superclass, interfaces, constantPool, javaClass, sourceFileName,
-                        permittedSubclassNames(originalType, javaClass));
+                        permittedSubclassNames(originalType));
     }
 
     @VisibleForSerialization
@@ -307,12 +439,7 @@ public class InterpreterResolvedObjectType extends InterpreterResolvedJavaType {
     }
 
     @Platforms(Platform.HOSTED_ONLY.class)
-    private static Symbol<Name>[] permittedSubclassNames(ResolvedJavaType originalType, Class<?> javaClass) {
-        Symbol<Name>[] parsedNames = permittedSubclassNames(javaClass);
-        if (parsedNames != null) {
-            return parsedNames;
-        }
-
+    private static Symbol<Name>[] permittedSubclassNames(ResolvedJavaType originalType) {
         ResolvedJavaType sourceType = OriginalClassProvider.getOriginalType(originalType);
         List<? extends JavaType> permittedSubclasses = sourceType.getPermittedSubclasses();
         if (permittedSubclasses == null) {
@@ -322,38 +449,10 @@ public class InterpreterResolvedObjectType extends InterpreterResolvedJavaType {
         Symbol<Name>[] result = (Symbol<Name>[]) new Symbol<?>[permittedSubclasses.size()];
         for (int i = 0; i < result.length; i++) {
             // Store the class-file name so build-time and Crema-loaded sealed classes use the same symbolic representation.
-            String classFileName = permittedSubclasses.get(i).toClassName().replace('.', '/');
+            String classFileType = permittedSubclasses.get(i).getName();
+            assert classFileType.startsWith("L") && classFileType.endsWith(";") : classFileType;
+            String classFileName = classFileType.substring(1, classFileType.length() - 1);
             result[i] = SymbolsSupport.getNames().getOrCreate(ByteSequence.create(classFileName));
-        }
-        return result;
-    }
-
-    @Platforms(Platform.HOSTED_ONLY.class)
-    private static Symbol<Name>[] permittedSubclassNames(Class<?> javaClass) {
-        String classFileName = javaClass.getName().replace('.', '/') + ".class";
-        try (InputStream stream = javaClass.getClassLoader() == null ? ClassLoader.getSystemResourceAsStream(classFileName) : javaClass.getClassLoader().getResourceAsStream(classFileName)) {
-            if (stream == null) {
-                return null;
-            }
-            // Read the class-file attribute directly so permitted subclasses stay symbolic.
-            ParserKlass parsed = ClassfileParser.parse(ClassRegistries.currentLayer(), new ClassfileStream(stream.readAllBytes(), null), false, javaClass.getClassLoader() == null, null,
-                            javaClass.isHidden(), true, false);
-            return permittedSubclassNames(parsed);
-        } catch (IOException | ValidationException | ParserException e) {
-            throw VMError.shouldNotReachHere("Cannot parse class file for " + javaClass.getName(), e);
-        }
-    }
-
-    private static Symbol<Name>[] permittedSubclassNames(ParserKlass parserKlass) {
-        PermittedSubclassesAttribute permittedSubclasses = parserKlass.getAttribute(PermittedSubclassesAttribute.NAME, PermittedSubclassesAttribute.class);
-        if (permittedSubclasses == null) {
-            return null;
-        }
-        char[] classes = permittedSubclasses.getClasses();
-        @SuppressWarnings("unchecked")
-        Symbol<Name>[] result = (Symbol<Name>[]) new Symbol<?>[classes.length];
-        for (int i = 0; i < classes.length; i++) {
-            result[i] = parserKlass.getConstantPool().className(classes[i]);
         }
         return result;
     }
@@ -400,8 +499,9 @@ public class InterpreterResolvedObjectType extends InterpreterResolvedJavaType {
         return false;
     }
 
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public Object getStaticStorage(boolean primitives, int layerNum) {
-        assert layerNum != MultiLayeredImageSingleton.NONSTATIC_FIELD_LAYER_NUMBER : "Requesting static storage for a non-static field: " + layerNum;
+        assert layerNum != MultiLayeredImageSingleton.NONSTATIC_FIELD_LAYER_NUMBER;
         if (primitives) {
             return StaticFieldsSupport.getStaticPrimitiveFieldsAtRuntime(layerNum);
         } else {
@@ -439,9 +539,15 @@ public class InterpreterResolvedObjectType extends InterpreterResolvedJavaType {
     }
 
     public final void setVtable(InterpreterResolvedJavaMethod[] vtable, int classVtableLength) {
+        setVtable(vtable, classVtableLength, VTableHolder.UNKNOWN);
+    }
+
+    public final void setVtable(InterpreterResolvedJavaMethod[] vtable, int classVtableLength, int mirandaMethodsStart) {
         // The stored table may include interface dispatch tail entries beyond the class vtable.
         VMError.guarantee(classVtableLength >= 0 && classVtableLength <= vtable.length, "Invalid class vtable length");
-        this.vtableHolder = new VTableHolder(this, vtable, classVtableLength);
+        VMError.guarantee((mirandaMethodsStart >= 0 && mirandaMethodsStart <= classVtableLength) || mirandaMethodsStart == VTableHolder.UNKNOWN,
+                        "Invalid miranda methods range");
+        this.vtableHolder = new VTableHolder(this, vtable, classVtableLength, mirandaMethodsStart);
     }
 
     public final int getClassVtableLength() {
@@ -563,14 +669,29 @@ public class InterpreterResolvedObjectType extends InterpreterResolvedJavaType {
 
     @Override
     public InterpreterResolvedJavaField findInstanceFieldWithOffset(long offset, JavaKind expectedKind) {
+        return findFieldWithOffset(offset, expectedKind, false);
+    }
+
+    public InterpreterResolvedJavaField findStaticFieldWithOffset(long offset, JavaKind expectedKind) {
+        return findFieldWithOffset(offset, expectedKind, true);
+    }
+
+    private InterpreterResolvedJavaField findFieldWithOffset(long offset, JavaKind expectedKind, boolean isStatic) {
         if (offset < 0) {
             return null;
         }
-        // Search all instance fields including superclasses
-        InterpreterResolvedJavaField[] fields = getInstanceFields(true);
-        for (InterpreterResolvedJavaField f : fields) {
+        // Search all fields
+        InterpreterResolvedJavaField result = findDeclaredFieldWithOffset(offset, expectedKind, isStatic);
+        if (result != null || isStatic || superclass == null) {
+            return result;
+        }
+        return superclass.findFieldWithOffset(offset, expectedKind, false);
+    }
+
+    private InterpreterResolvedJavaField findDeclaredFieldWithOffset(long offset, JavaKind expectedKind, boolean isStatic) {
+        for (InterpreterResolvedJavaField f : declaredFields) {
             // Compare offsets (stored as int at build time but passed as long here)
-            if (f.getOffset() == offset) {
+            if (f.getOffset() == offset && f.isStatic() == isStatic) {
                 // If an expected kind is provided, enforce it
                 if (expectedKind == null || expectedKind == f.getJavaKind()) {
                     return f;
@@ -586,25 +707,6 @@ public class InterpreterResolvedObjectType extends InterpreterResolvedJavaType {
             return clazz.getName();
         }
         throw VMError.unimplemented("getJavaName");
-    }
-
-    @Override
-    public final InterpreterResolvedJavaType findLeastCommonAncestor(InterpreterResolvedJavaType other) {
-        assert !isPrimitive() && !other.isPrimitive();
-        assert !isInterface() && !other.isInterface();
-        assert !isArray() && !other.isArray();
-        InterpreterResolvedObjectType t1 = this;
-        InterpreterResolvedObjectType t2 = (InterpreterResolvedObjectType) other;
-        while (true) {
-            if (t1.isAssignableFrom(t2)) {
-                return t1;
-            }
-            if (t2.isAssignableFrom(t1)) {
-                return t2;
-            }
-            t1 = t1.getSuperclass();
-            t2 = t2.getSuperclass();
-        }
     }
 
     /**
@@ -632,8 +734,10 @@ public class InterpreterResolvedObjectType extends InterpreterResolvedJavaType {
 
     @Override
     public List<InterpreterResolvedJavaMethod> getImplicitInterfaceMethodsList() {
-        // GR-70607: get mirandas.
-        return null;
+        if (vtableHolder == null) {
+            return null;
+        }
+        return vtableHolder.getImplicitInterfaceMethodsList();
     }
 
     @Override
@@ -672,6 +776,20 @@ public class InterpreterResolvedObjectType extends InterpreterResolvedJavaType {
     }
 
     public final void imposeLoadingConstraints() {
+        /*
+         * Preparation updates shared loading-constraint state through the vtable and itable walks
+         * below. Keep the yellow zone available for the complete update so StackOverflowError
+         * cannot expose partially recorded constraints.
+         */
+        StackOverflowCheck.singleton().makeYellowZoneAvailable();
+        try {
+            imposeLoadingConstraints0();
+        } finally {
+            StackOverflowCheck.singleton().protectYellowZone();
+        }
+    }
+
+    private void imposeLoadingConstraints0() {
         if (!isInterface() && getSuperClass() != null) {
             InterpreterResolvedJavaMethod[] thisTable = getVtable();
             InterpreterResolvedJavaMethod[] superTable = getSuperClass().getVtable();
