@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -858,34 +858,6 @@ public abstract class TruffleInstrument {
         }
 
         /**
-         * Returns a {@link TruffleFile} for given path. This must be called on a context thread
-         * only.
-         *
-         * @param path the absolute or relative path to create {@link TruffleFile} for
-         * @return {@link TruffleFile}
-         * @since 19.0
-         * @deprecated since 23.0. Use {@link #getTruffleFile(TruffleContext, String)}.
-         */
-        @Deprecated
-        public TruffleFile getTruffleFile(String path) {
-            return getTruffleFile(null, path);
-        }
-
-        /**
-         * Returns a {@link TruffleFile} for given {@link URI}. This must be called on a context
-         * thread only.
-         *
-         * @param uri the {@link URI} to create {@link TruffleFile} for
-         * @return {@link TruffleFile}
-         * @since 19.0
-         * @deprecated since 23.0. Use {@link #getTruffleFile(TruffleContext, URI)}.
-         */
-        @Deprecated
-        public TruffleFile getTruffleFile(URI uri) {
-            return getTruffleFile(null, uri);
-        }
-
-        /**
          * Returns a {@link TruffleFile} for given path and {@link TruffleContext context}.
          *
          * @param context the {@link TruffleContext}, or <code>null</code> to use a current entered
@@ -1136,7 +1108,7 @@ public abstract class TruffleInstrument {
          * {@link TruffleInstrument#onCreate(com.oracle.truffle.api.instrumentation.TruffleInstrument.Env)
          * onCreate} method.
          *
-         * @param loggerName the the name of a {@link TruffleLogger}, if a {@code loggerName} is
+         * @param loggerName the name of a {@link TruffleLogger}, if a {@code loggerName} is
          *            null or empty a root logger for language or instrument is returned
          * @return a {@link TruffleLogger}
          * @since 19.0
@@ -1253,7 +1225,7 @@ public abstract class TruffleInstrument {
          * {@link ThreadLocalAction#ThreadLocalAction(boolean, boolean, boolean) recurring} then the
          * action will automatically be rescheduled in the same configuration until it is
          * {@link Future#cancel(boolean) cancelled}. For recurring actions, an invocation of
-         * {@link Future#get()} will only wait for the first action to to be performed.
+         * {@link Future#get()} will only wait for the first action to be performed.
          * {@link Future#isDone()} will return <code>true</code> only if the action was canceled.
          * Canceling a recurring action will result in the current event being canceled and no
          * further events being submitted. Using recurring events should be preferred over

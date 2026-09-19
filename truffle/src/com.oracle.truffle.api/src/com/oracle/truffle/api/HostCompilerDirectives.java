@@ -166,26 +166,6 @@ public final class HostCompilerDirectives {
     }
 
     /**
-     * Marks a method that is called from a Truffle interpreter, but is not called frequently and is
-     * not important for interpreter performance.
-     * <p>
-     * This annotation is used to annotate methods that are called from a bytecode interpreter, but
-     * should generally not be inlined into the body of the bytecode interpreter. Language
-     * implementers are advised to inspect the IR of the interpreter when using this.
-     *
-     * @see BytecodeInterpreterSwitch to annotate the root method of a bytecode interpreter
-     *
-     * @deprecated use is no longer needed. boundaries for {@link BytecodeInterpreterSwitch} are
-     *             mostly determined automatically. To migrate remove all usages.
-     * @since 21.0
-     */
-    @Retention(RetentionPolicy.RUNTIME)
-    @Target({ElementType.METHOD, ElementType.CONSTRUCTOR})
-    @Deprecated(since = "22.2")
-    public @interface BytecodeInterpreterSwitchBoundary {
-    }
-
-    /**
      * Hints to Truffle host inlining that a particular method is partial evaluatable, but it would
      * be a good place for a cutoff when performing host inlining. A host compiler may use this
      * information as a hint to take trade-offs optimizing the code. Good examples of cutoffs are:
@@ -375,6 +355,26 @@ public final class HostCompilerDirectives {
          * corresponds to the receiver.
          */
         Argument[] arguments();
+
+        /**
+         * Indicates that the annotated method implements a secondary partition of a bytecode
+         * interpreter switch.
+         * <p>
+         * A secondary switch is expected to be inlined into a primary
+         * {@link BytecodeInterpreterSwitch} method during host compilation. Its handler
+         * configuration is retained so that handler calls originating from the inlined secondary
+         * switch can be mapped to the primary switch's handler stubs.
+         * <p>
+         * When compiled as a separate method, however, handler calls in a secondary switch are not
+         * outlined. In particular, a deoptimization target may invoke the separately compiled
+         * secondary switch without first passing through host inlining. Keeping its handler calls
+         * ordinary prevents such execution from entering threaded handler stubs without the
+         * primary switch's exception and state-management paths.
+         *
+         * @return {@code true} if the annotated method is a secondary switch partition whose
+         *         handler calls must not be outlined when the method is compiled separately
+         */
+        boolean secondarySwitch() default false;
     }
 
     /**

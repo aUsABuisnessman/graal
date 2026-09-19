@@ -27,9 +27,11 @@ package com.oracle.svm.test;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import java.lang.reflect.Executable;
 import java.lang.reflect.Field;
+import java.util.Set;
 
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.MissingReflectionRegistrationError;
@@ -38,7 +40,10 @@ import org.graalvm.nativeimage.hosted.RuntimeReflection;
 import org.graalvm.nativeimage.impl.RuntimeReflectionSupport;
 import org.junit.Test;
 
+import com.oracle.svm.hosted.reflect.ReflectionHostedSupport;
 import com.oracle.svm.hosted.substitute.SubstitutionReflectivityFilter;
+
+import jdk.internal.misc.Unsafe;
 
 /**
  * Tests the {@link RuntimeReflection}.
@@ -49,6 +54,9 @@ public class ReflectionRegistrationTest {
 
     public static class FieldLookupTarget {
         public int value = FIELD_LOOKUP_TEST_VALUE;
+    }
+
+    public static class UnsafeAllocationTarget {
     }
 
     public static class TestFeature implements Feature {
@@ -120,9 +128,17 @@ public class ReflectionRegistrationTest {
                 // expected
             }
 
+            RuntimeReflection.register(FieldLookupTarget.class);
             RuntimeReflection.registerFieldLookup(FieldLookupTarget.class, "value");
         }
 
+        @Override
+        public void afterAnalysis(AfterAnalysisAccess access) {
+            Set<String> knownClassNames = ImageSingletons.lookup(ReflectionHostedSupport.class).getKnownClassNames();
+            if (!knownClassNames.contains(FieldLookupTarget.class.getName())) {
+                throw new AssertionError(FieldLookupTarget.class.getName() + " is missing from reflection metadata");
+            }
+        }
     }
 
     @Test
@@ -134,6 +150,36 @@ public class ReflectionRegistrationTest {
     public void testFieldLookupAllowsAccess() throws ReflectiveOperationException {
         Field field = FieldLookupTarget.class.getDeclaredField("value");
         assertEquals(FIELD_LOOKUP_TEST_VALUE, field.get(new FieldLookupTarget()));
+    }
+
+    private static Object unsafeAllocate(Class<?> clazz) throws ReflectiveOperationException {
+        Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
+        unsafeField.setAccessible(true);
+        return ((Unsafe) unsafeField.get(null)).allocateInstance(clazz);
+    }
+
+    @NativeImageBuildArgs({
+                    "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+                    "--add-opens=java.base/jdk.internal.misc=ALL-UNNAMED"
+    })
+    public static class UnsafeAllocationLegacyTest {
+        @Test
+        public void testUnregisteredUnsafeAllocationKeepsLegacyExceptionType() {
+            IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () -> unsafeAllocate(UnsafeAllocationTarget.class));
+            assertTrue(exception.getMessage().contains("unsafeAllocated"));
+        }
+    }
+
+    @NativeImageBuildArgs({
+                    "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+                    "--add-opens=java.base/jdk.internal.misc=ALL-UNNAMED",
+                    "--future-defaults=exact-reflection"
+    })
+    public static class ExactReflectionFutureDefaultTest {
+        @Test
+        public void testUnregisteredUnsafeAllocationThrowsMissingRegistrationError() {
+            assertThrows(MissingReflectionRegistrationError.class, () -> unsafeAllocate(UnsafeAllocationTarget.class));
+        }
     }
 
     @NativeImageBuildArgs({

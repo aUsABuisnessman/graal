@@ -42,6 +42,7 @@ import java.util.function.Supplier;
 
 import org.graalvm.word.LocationIdentity;
 
+import com.oracle.truffle.compiler.TruffleCompilable;
 import com.oracle.truffle.compiler.TruffleCompilationTask;
 
 import jdk.graal.compiler.core.common.NumUtil;
@@ -95,7 +96,7 @@ import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugin.RequiredInline
 import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugin.RequiredInvocationPlugin;
 import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugins;
 import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugins.Registration;
-import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugins.ResolvedJavaSymbol;
+import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugins.TypeSymbol;
 import jdk.graal.compiler.nodes.java.InstanceOfDynamicNode;
 import jdk.graal.compiler.nodes.java.LoadFieldNode;
 import jdk.graal.compiler.nodes.java.MethodCallTargetNode;
@@ -116,13 +117,13 @@ import jdk.graal.compiler.truffle.KnownTruffleTypes;
 import jdk.graal.compiler.truffle.PerformanceInformationHandler;
 import jdk.graal.compiler.truffle.TruffleCompilation;
 import jdk.graal.compiler.truffle.TruffleCompilerOptions.PerformanceWarningKind;
-import jdk.graal.compiler.truffle.TruffleDebugJavaMethod;
+import jdk.graal.compiler.truffle.TruffleGraphContext;
 import jdk.graal.compiler.truffle.nodes.AnyExtendNode;
 import jdk.graal.compiler.truffle.nodes.AnyNarrowNode;
 import jdk.graal.compiler.truffle.nodes.IsCompilationConstantNode;
 import jdk.graal.compiler.truffle.nodes.ObjectLocationIdentity;
-import jdk.graal.compiler.truffle.nodes.TrufflePreserveFrameStateNode;
 import jdk.graal.compiler.truffle.nodes.TruffleAssumption;
+import jdk.graal.compiler.truffle.nodes.TrufflePreserveFrameStateNode;
 import jdk.graal.compiler.truffle.nodes.asserts.NeverPartOfCompilationNode;
 import jdk.graal.compiler.truffle.nodes.frame.AllowMaterializeNode;
 import jdk.graal.compiler.truffle.nodes.frame.ForceMaterializeNode;
@@ -188,12 +189,24 @@ public class TruffleGraphBuilderPlugins {
         registerMemorySegmentPlugins(plugins, types, canDelayIntrinsification);
         registerByteArraySupportPlugins(plugins, canDelayIntrinsification);
         registerAtomicFieldUpdaterPlugins(plugins, types);
+        registerUnsafePlugins(plugins);
+    }
+
+    private static void registerUnsafePlugins(InvocationPlugins plugins) {
+        /* The JDK warning and deny policy is not needed for trusted Truffle compilations. */
+        Registration r = new Registration(plugins, "sun.misc.Unsafe");
+        r.register(new OptionalInvocationPlugin("beforeMemoryAccess") {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver) {
+                return true;
+            }
+        });
     }
 
     private static void registerTruffleSafepointPlugins(InvocationPlugins plugins, KnownTruffleTypes types, boolean canDelayIntrinsification) {
         final ResolvedJavaType truffleSafepoint = types.TruffleSafepoint;
-        Registration r = new Registration(plugins, new ResolvedJavaSymbol(truffleSafepoint));
-        r.register(new RequiredInvocationPlugin("poll", new ResolvedJavaSymbol(types.Node)) {
+        Registration r = new Registration(plugins, new TypeSymbol(truffleSafepoint));
+        r.register(new RequiredInvocationPlugin("poll", new TypeSymbol(types.Node)) {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode arg) {
                 if (!TruffleSafepointInsertionPhase.allowsSafepoints(b.getGraph())) {
@@ -236,14 +249,14 @@ public class TruffleGraphBuilderPlugins {
     }
 
     private static void registerObjectsPlugins(InvocationPlugins plugins, KnownTruffleTypes types) {
-        Registration r = new Registration(plugins, new ResolvedJavaSymbol(types.Objects));
+        Registration r = new Registration(plugins, new TypeSymbol(types.Objects));
         r.register(new RequireNonNullPlugin(Object.class));
         r.register(new RequireNonNullPlugin(Object.class, String.class));
         r.register(new RequireNonNullPlugin(Object.class, Supplier.class));
     }
 
     public static void registerOptimizedAssumptionPlugins(InvocationPlugins plugins, KnownTruffleTypes types) {
-        Registration r = new Registration(plugins, new ResolvedJavaSymbol(types.OptimizedAssumption));
+        Registration r = new Registration(plugins, new TypeSymbol(types.OptimizedAssumption));
         r.register(new RequiredInvocationPlugin("isValid", Receiver.class) {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver) {
@@ -284,7 +297,7 @@ public class TruffleGraphBuilderPlugins {
     }
 
     public static void registerExactMathPlugins(InvocationPlugins plugins, KnownTruffleTypes types) {
-        Registration r = new Registration(plugins, new ResolvedJavaSymbol(types.ExactMath));
+        Registration r = new Registration(plugins, new TypeSymbol(types.ExactMath));
         for (JavaKind kind : new JavaKind[]{JavaKind.Int, JavaKind.Long}) {
             Class<?> type = kind.toJavaClass();
             r.register(new InvocationPlugin("multiplyHigh", type, type) {
@@ -320,7 +333,7 @@ public class TruffleGraphBuilderPlugins {
 
     public static void registerHostCompilerDirectivesPlugins(InvocationPlugins plugins, KnownTruffleTypes types) {
         final ResolvedJavaType compilerDirectivesType = types.HostCompilerDirectives;
-        Registration r = new Registration(plugins, new ResolvedJavaSymbol(compilerDirectivesType));
+        Registration r = new Registration(plugins, new TypeSymbol(compilerDirectivesType));
         r.register(new RequiredInvocationPlugin("inInterpreterFastPath") {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver) {
@@ -332,7 +345,7 @@ public class TruffleGraphBuilderPlugins {
 
     public static void registerCompilerDirectivesPlugins(InvocationPlugins plugins, KnownTruffleTypes types, boolean canDelayIntrinsification) {
         final ResolvedJavaType compilerDirectivesType = types.CompilerDirectives;
-        Registration r = new Registration(plugins, new ResolvedJavaSymbol(compilerDirectivesType));
+        Registration r = new Registration(plugins, new TypeSymbol(compilerDirectivesType));
         r.register(new RequiredInvocationPlugin("inInterpreter") {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver) {
@@ -375,12 +388,8 @@ public class TruffleGraphBuilderPlugins {
                     // Delay until PE graph decoding where we have an inlining context.
                     return false;
                 }
-                GraphBuilderContext.ExternalInliningContext inliningContext = b.getExternalInliningContext();
-                if (inliningContext != null) {
-                    b.addPush(JavaKind.Boolean, ConstantNode.forBoolean(inliningContext.getInlinedDepth() == 0));
-                    return true;
-                }
-                return false;
+                b.addPush(JavaKind.Boolean, ConstantNode.forBoolean(!TruffleGraphContext.get(b.getGraph()).isGuestInlining()));
+                return true;
             }
         });
         r.register(new RequiredInvocationPlugin("transferToInterpreter") {
@@ -545,7 +554,7 @@ public class TruffleGraphBuilderPlugins {
 
     public static void registerCompilerAssertsPlugins(InvocationPlugins plugins, KnownTruffleTypes types, boolean canDelayIntrinsification) {
         final ResolvedJavaType compilerAssertsType = types.CompilerAsserts;
-        Registration r = new Registration(plugins, new ResolvedJavaSymbol(compilerAssertsType));
+        Registration r = new Registration(plugins, new TypeSymbol(compilerAssertsType));
         r.register(new PEConstantPlugin(canDelayIntrinsification, Object.class));
         r.register(new PEConstantPlugin(canDelayIntrinsification, int.class));
         r.register(new PEConstantPlugin(canDelayIntrinsification, long.class));
@@ -575,8 +584,8 @@ public class TruffleGraphBuilderPlugins {
 
     public static void registerOptimizedCallTargetPlugins(InvocationPlugins plugins, KnownTruffleTypes types, boolean canDelayIntrinsification) {
         final ResolvedJavaType optimizedCallTargetType = types.OptimizedCallTarget;
-        Registration r = new Registration(plugins, new ResolvedJavaSymbol(optimizedCallTargetType));
-        r.register(new RequiredInvocationPlugin("createFrame", new ResolvedJavaSymbol(types.FrameDescriptor), Object[].class) {
+        Registration r = new Registration(plugins, new TypeSymbol(optimizedCallTargetType));
+        r.register(new RequiredInvocationPlugin("createFrame", new TypeSymbol(types.FrameDescriptor), Object[].class) {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode descriptor, ValueNode args) {
                 if (canDelayIntrinsification) {
@@ -611,7 +620,7 @@ public class TruffleGraphBuilderPlugins {
     }
 
     public static void registerFrameWithoutBoxingPlugins(InvocationPlugins plugins, KnownTruffleTypes types, boolean canDelayIntrinsification) {
-        Registration r = new Registration(plugins, new ResolvedJavaSymbol(types.FrameWithoutBoxing));
+        Registration r = new Registration(plugins, new TypeSymbol(types.FrameWithoutBoxing));
         registerFrameMethods(r, types);
         registerUnsafeLoadStorePlugins(r, canDelayIntrinsification, null, JavaKind.Long, JavaKind.Object);
         registerFrameAccessors(r, types, JavaKind.Object);
@@ -1046,7 +1055,7 @@ public class TruffleGraphBuilderPlugins {
 
     public static void registerNodePlugins(InvocationPlugins plugins, KnownTruffleTypes types, MetaAccessProvider metaAccess, boolean canDelayIntrinsification,
                     ConstantReflectionProvider constantReflection) {
-        Registration r = new Registration(plugins, new ResolvedJavaSymbol(types.Node));
+        Registration r = new Registration(plugins, new TypeSymbol(types.Node));
         r.register(new RequiredInvocationPlugin("getRootNodeImpl", Receiver.class) {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver) {
@@ -1085,7 +1094,7 @@ public class TruffleGraphBuilderPlugins {
     }
 
     private static void registerBufferPlugins(InvocationPlugins plugins, KnownTruffleTypes types, boolean canDelayIntrinsification) {
-        Registration r = new Registration(plugins, new ResolvedJavaSymbol(types.Buffer));
+        Registration r = new Registration(plugins, new TypeSymbol(types.Buffer));
 
         final class CreateExceptionPlugin extends RequiredInvocationPlugin {
             CreateExceptionPlugin(String name, Type... argumentTypes) {
@@ -1111,7 +1120,7 @@ public class TruffleGraphBuilderPlugins {
     private static void registerMemorySegmentPlugins(InvocationPlugins plugins, KnownTruffleTypes types, boolean canDelayIntrinsification) {
         ResolvedJavaType memorySegmentImplType = types.AbstractMemorySegmentImpl;
         if (memorySegmentImplType != null) {
-            Registration r = new Registration(plugins, new ResolvedJavaSymbol(memorySegmentImplType));
+            Registration r = new Registration(plugins, new TypeSymbol(memorySegmentImplType));
             r.register(new OptionalInvocationPlugin("sessionImpl", Receiver.class) {
                 /**
                  * ByteBuffer methods and VarHandles use the following code pattern to get any
@@ -1176,7 +1185,7 @@ public class TruffleGraphBuilderPlugins {
 
         JavaKind[] usedJavaKinds = {JavaKind.Boolean, JavaKind.Byte, JavaKind.Int, JavaKind.Short, JavaKind.Long, JavaKind.Float, JavaKind.Double, JavaKind.Object};
 
-        Registration r = new Registration(plugins, new ResolvedJavaSymbol(types.UnsafeAccess));
+        Registration r = new Registration(plugins, new TypeSymbol(types.UnsafeAccess));
         registerUnsafeLoadStorePlugins(r, canDelayIntrinsification, anyConstant, usedJavaKinds);
         registerUnsafeLoadFinalPlugins(r, canDelayIntrinsification, types, JavaKind.Int, JavaKind.Long, JavaKind.Double, JavaKind.Object);
         registerUnsafeCast(r, types, canDelayIntrinsification);
@@ -1189,8 +1198,8 @@ public class TruffleGraphBuilderPlugins {
     private static void registerDynamicObjectShapePlugins(InvocationPlugins plugins, KnownTruffleTypes types, boolean canDelayIntrinsification) {
         ResolvedJavaType dynamicObjectType = types.DynamicObject;
         ResolvedJavaType shapeType = types.Shape;
-        ResolvedJavaSymbol dynamicObjectSymbol = new ResolvedJavaSymbol(dynamicObjectType);
-        ResolvedJavaSymbol shapeSymbol = new ResolvedJavaSymbol(shapeType);
+        TypeSymbol dynamicObjectSymbol = new TypeSymbol(dynamicObjectType);
+        TypeSymbol shapeSymbol = new TypeSymbol(shapeType);
         Registration r = new Registration(plugins, dynamicObjectSymbol);
         r.register(new RequiredInvocationPlugin("getShapeHelper", shapeSymbol) {
             @Override
@@ -1352,7 +1361,7 @@ public class TruffleGraphBuilderPlugins {
             String getName = "unsafeGetFinal" + kindName;
             r.register(new CustomizedUnsafeLoadFinalPlugin(kind, canDelayIntrinsification, types,
                             getName, Object.class, long.class, boolean.class, Object.class,
-                            new ResolvedJavaSymbol(types.Shape), Object.class));
+                            new TypeSymbol(types.Shape), Object.class));
         }
     }
 
@@ -1534,14 +1543,13 @@ public class TruffleGraphBuilderPlugins {
             StructuredGraph graph = location.graph();
             DebugContext debug = access.getDebug();
             try (DebugContext.Scope s = debug.scope("TrufflePerformanceWarnings", graph)) {
-                TruffleDebugJavaMethod truffleMethod = debug.contextLookup(TruffleDebugJavaMethod.class);
-                if (truffleMethod != null) {    // Never null in compilation but can be null in
-                                                // TruffleCompilerImplTest
+                if (TruffleCompilation.isTruffleCompilation(graph)) { // Can be false in TruffleCompilerImplTest.
+                    TruffleCompilable compilable = TruffleGraphContext.get(graph).getCompilable();
                     Map<String, Object> properties = new LinkedHashMap<>();
                     properties.put("location", location);
                     properties.put("method", targetMethod.format("%h.%n"));
 
-                    PerformanceInformationHandler.logPerformanceWarning(PerformanceWarningKind.VIRTUAL_STORE, truffleMethod.getCompilable(),
+                    PerformanceInformationHandler.logPerformanceWarning(PerformanceWarningKind.VIRTUAL_STORE, compilable,
                                     Collections.singletonList(access),
                                     "location argument not PE-constant", properties);
                     debug.dump(DebugContext.VERBOSE_LEVEL, graph, "perf warn: Location argument is not a partial evaluation constant: %s", location);
@@ -1558,9 +1566,8 @@ public class TruffleGraphBuilderPlugins {
             StructuredGraph graph = type.graph();
             DebugContext debug = type.getDebug();
             try (DebugContext.Scope s = debug.scope("TrufflePerformanceWarnings", graph)) {
-                TruffleDebugJavaMethod truffleMethod = debug.contextLookup(TruffleDebugJavaMethod.class);
-                if (truffleMethod != null) {    // Never null in compilation but can be null in
-                                                // TruffleCompilerImplTest
+                if (TruffleCompilation.isTruffleCompilation(graph)) { // Can be false in TruffleCompilerImplTest.
+                    TruffleCompilable compilable = TruffleGraphContext.get(graph).getCompilable();
                     Map<String, Object> properties = new LinkedHashMap<>();
                     List<ValueNode> nonConstArgs = new ArrayList<>();
                     properties.put("type", type);
@@ -1576,7 +1583,7 @@ public class TruffleGraphBuilderPlugins {
                         nonConstArgs.add(isExactType);
                     }
                     properties.put("method", targetMethod.format("%h.%n"));
-                    PerformanceInformationHandler.logPerformanceWarning(PerformanceWarningKind.VIRTUAL_STORE, truffleMethod.getCompilable(), nonConstArgs,
+                    PerformanceInformationHandler.logPerformanceWarning(PerformanceWarningKind.VIRTUAL_STORE, compilable, nonConstArgs,
                                     "unsafeCast arguments could not reduce to a constant", properties);
                     debug.dump(DebugContext.VERBOSE_LEVEL, graph, "perf warn: unsafeCast arguments could not reduce to a constant: %s, %s, %s", type, nonNull, isExactType);
                 }
@@ -1746,7 +1753,7 @@ public class TruffleGraphBuilderPlugins {
     private static void registerAtomicFieldUpdaterPlugins(InvocationPlugins plugins, KnownTruffleTypes types) {
         InvocationPlugins.Registration r;
 
-        r = new InvocationPlugins.Registration(plugins, new ResolvedJavaSymbol(types.AtomicIntegerFieldUpdater));
+        r = new InvocationPlugins.Registration(plugins, new TypeSymbol(types.AtomicIntegerFieldUpdater));
         r.register(new RequiredInvocationPlugin("accessCheck", Receiver.class, Object.class) {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode arg) {
@@ -1755,7 +1762,7 @@ public class TruffleGraphBuilderPlugins {
             }
         });
 
-        r = new InvocationPlugins.Registration(plugins, new ResolvedJavaSymbol(types.AtomicLongFieldUpdater));
+        r = new InvocationPlugins.Registration(plugins, new TypeSymbol(types.AtomicLongFieldUpdater));
         r.register(new RequiredInvocationPlugin("accessCheck", Receiver.class, Object.class) {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode arg) {
@@ -1764,7 +1771,7 @@ public class TruffleGraphBuilderPlugins {
             }
         });
 
-        r = new InvocationPlugins.Registration(plugins, new ResolvedJavaSymbol(types.AtomicReferenceFieldUpdater));
+        r = new InvocationPlugins.Registration(plugins, new TypeSymbol(types.AtomicReferenceFieldUpdater));
         r.register(new RequiredInvocationPlugin("accessCheck", Receiver.class, Object.class) {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode arg) {

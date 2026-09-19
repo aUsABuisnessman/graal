@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core.gc.shared;
 
-import static com.oracle.svm.core.option.RuntimeOptionKey.RuntimeOptionKeyFlag.IsolateCreationOnly;
+import static com.oracle.svm.guest.staging.option.RuntimeOptionKey.RuntimeOptionKeyFlag.IsolateCreationOnly;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -38,11 +38,17 @@ import java.util.function.Supplier;
 
 import org.graalvm.collections.UnmodifiableEconomicMap;
 import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platform.DARWIN_AARCH64;
+import org.graalvm.nativeimage.Platform.LINUX_AARCH64;
+import org.graalvm.nativeimage.Platform.LINUX_AMD64;
+import org.graalvm.nativeimage.Platform.WINDOWS_AMD64;
 import org.graalvm.nativeimage.Platforms;
 
+import com.oracle.svm.core.OS;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.option.RuntimeOptionKey;
-import com.oracle.svm.core.option.RuntimeOptionValues;
+import com.oracle.svm.guest.staging.option.RuntimeOptionKey;
+import com.oracle.svm.guest.staging.option.RuntimeOptionValidation;
+import com.oracle.svm.guest.staging.option.RuntimeOptionValues;
 import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.shared.option.HostedOptionKey;
 import com.oracle.svm.shared.option.HostedOptionValues;
@@ -92,7 +98,7 @@ public class NativeGCOptions {
     protected static final RuntimeOptionKey<Integer> ConcGCThreads = new NativeGCRuntimeOptionKey<>(0, IsolateCreationOnly);
 
     @Option(help = "Determines if System.gc() invokes a concurrent collection.", type = OptionType.Expert)//
-    protected static final RuntimeOptionKey<Boolean> ExplicitGCInvokesConcurrent = new NativeGCRuntimeOptionKey<>(false, IsolateCreationOnly);
+    public static final RuntimeOptionKey<Boolean> ExplicitGCInvokesConcurrent = new NativeGCRuntimeOptionKey<>(false, IsolateCreationOnly);
 
     @Option(help = "Wasted fraction of parallel allocation buffer.", type = OptionType.Expert)//
     protected static final RuntimeOptionKey<Integer> ParallelGCBufferWastePct = new NativeGCRuntimeOptionKey<>(10, IsolateCreationOnly);
@@ -234,13 +240,25 @@ public class NativeGCOptions {
         ArrayList<Field> result = new ArrayList<>();
         for (Class<?> clazz : optionClasses) {
             for (Field field : clazz.getDeclaredFields()) {
-                if (Modifier.isStatic(field.getModifiers()) && OptionKey.class.isAssignableFrom(field.getType())) {
+                if (Modifier.isStatic(field.getModifiers()) && OptionKey.class.isAssignableFrom(field.getType()) && isOptionAvailable(field)) {
                     field.setAccessible(true);
                     result.add(field);
                 }
             }
         }
         return result;
+    }
+
+    /**
+     * Some options are platform-specific. We need to filter those to prevent that the C++ side
+     * complains that those options don't exist.
+     */
+    @Platforms(Platform.HOSTED_ONLY.class)
+    private static boolean isOptionAvailable(Field field) {
+        if (!OS.LINUX.isCurrent()) {
+            return !field.getName().equals(UseContainerSupport.getName());
+        }
+        return true;
     }
 
     private static void validatePowerOfTwo(HostedOptionKey<Integer> optionKey) {
@@ -255,10 +273,10 @@ public class NativeGCOptions {
             return;
         }
 
-        if (!Platform.includedIn(Platform.LINUX_AMD64.class) && !Platform.includedIn(Platform.LINUX_AARCH64.class)) {
-            throw UserError.abort("The option '%s' can only be used on linux/amd64 or linux/aarch64.", optionKey.getName());
+        if (!Platform.includedIn(LINUX_AMD64.class) && !Platform.includedIn(LINUX_AARCH64.class) && !Platform.includedIn(DARWIN_AARCH64.class) && !Platform.includedIn(WINDOWS_AMD64.class)) {
+            throw RuntimeOptionValidation.abort("The option '" + optionKey.getName() + "' can only be used on Linux/amd64, Linux/aarch64, macOS/aarch64, or Windows/amd64.");
         } else if (!SubstrateOptions.useG1GC()) {
-            throw UserError.abort("The option '%s' can only be used with the G1 ('--gc=G1') garbage collector.", optionKey.getName());
+            throw RuntimeOptionValidation.abort("The option '" + optionKey.getName() + "' can only be used with the G1 ('--gc=G1') garbage collector.");
         }
     }
 
@@ -268,21 +286,23 @@ public class NativeGCOptions {
         }
 
         @Override
-        public void validate() {
+        public void validateAfterParsing() {
             validatePlatformAndGC(this);
-            super.validate();
+            super.validateAfterParsing();
         }
     }
 
     public static class NativeGCRuntimeOptionKey<T> extends RuntimeOptionKey<T> {
         public NativeGCRuntimeOptionKey(T defaultValue, RuntimeOptionKeyFlag... flags) {
-            super(defaultValue, flags);
+            this(defaultValue, NativeGCRuntimeOptionKey::validateNativeGCOption, flags);
         }
 
-        @Override
-        public void validate() {
-            validatePlatformAndGC(this);
-            super.validate();
+        protected NativeGCRuntimeOptionKey(T defaultValue, Consumer<RuntimeOptionKey<T>> afterParsingValidation, RuntimeOptionKeyFlag... flags) {
+            super(defaultValue, null, afterParsingValidation, flags);
+        }
+
+        protected static void validateNativeGCOption(RuntimeOptionKey<?> optionKey) {
+            validatePlatformAndGC(optionKey);
         }
     }
 

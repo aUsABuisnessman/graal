@@ -100,10 +100,6 @@ import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.stream.Collectors;
 
-import com.oracle.truffle.api.test.OSUtils;
-import com.oracle.truffle.api.test.ReflectionUtils;
-import com.oracle.truffle.api.test.TestAPIAccessor;
-import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 import org.graalvm.nativebridge.Isolate;
 import org.graalvm.nativebridge.IsolateThread;
 import org.graalvm.nativebridge.ProcessIsolate;
@@ -133,9 +129,13 @@ import com.oracle.truffle.api.interop.ArityException;
 import com.oracle.truffle.api.interop.InteropException;
 import com.oracle.truffle.api.interop.UnsupportedTypeException;
 import com.oracle.truffle.api.test.GCUtils;
+import com.oracle.truffle.api.test.OSUtils;
+import com.oracle.truffle.api.test.ReflectionUtils;
 import com.oracle.truffle.api.test.SubprocessTestUtils;
+import com.oracle.truffle.api.test.TestAPIAccessor;
 import com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest;
 import com.oracle.truffle.api.test.polyglot.PolyglotCachingTest;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 import com.oracle.truffle.tck.tests.ValueAssert;
 import com.oracle.truffle.tck.tests.ValueAssert.Trait;
 
@@ -456,6 +456,18 @@ public class PolyglotIsolateTest {
         context = Context.newBuilder().engine(engine).build();
         context.close(true);
         engine.close(true);
+    }
+
+    @Test
+    public void testToStringAfterClose() {
+        Engine engine = Engine.newBuilder().allowExperimentalOptions(true).option("engine.SpawnIsolate", "true").build();
+        Context context = Context.newBuilder().engine(engine).build();
+        assertNotNull(engine.toString());
+        assertNotNull(context.toString());
+        context.close();
+        assertNotNull(context.toString());
+        engine.close();
+        assertNotNull(engine.toString());
     }
 
     @Test
@@ -1976,7 +1988,7 @@ public class PolyglotIsolateTest {
         try {
             Isolate<?> isolate = (Isolate<?>) TestAPIAccessor.ISOLATE.getIsolate(context.getEngine());
             assertTrue(isolate instanceof ProcessIsolate);
-            AsynchronousKillActiveChildProcess hostObject = new AsynchronousKillActiveChildProcess(isolate.getIsolateId(), 100);
+            AsynchronousKillActiveChildProcess hostObject = new AsynchronousKillActiveChildProcess(isolate.getIsolateId(), 100, null);
             Value binding = context.getBindings("triste");
             binding.putMember("hostObject", hostObject);
             AbstractPolyglotTest.assertFails(() -> context.eval("triste", "killActiveChildProcess(callback(100),1)"),
@@ -2003,11 +2015,13 @@ public class PolyglotIsolateTest {
 
         private final long externalIsolatePid;
         private final int killAtDepth;
+        private final String syncMessage;
         private boolean guestBlocked;
 
-        AsynchronousKillActiveChildProcess(long externalIsolatePid, int killAtDepth) {
+        AsynchronousKillActiveChildProcess(long externalIsolatePid, int killAtDepth, String syncMessage) {
             this.externalIsolatePid = externalIsolatePid;
             this.killAtDepth = killAtDepth;
+            this.syncMessage = syncMessage;
         }
 
         public void callback(int depth, Value guestCallBack) {
@@ -2026,6 +2040,9 @@ public class PolyglotIsolateTest {
         }
 
         public synchronized void notifyBlocked() {
+            if (syncMessage != null) {
+                System.out.println(syncMessage);
+            }
             guestBlocked = true;
             notifyAll();
         }
@@ -2049,11 +2066,13 @@ public class PolyglotIsolateTest {
      * useless, so we ensure it is terminated alongside the host process.
      */
     @Test
-    public void testHostProcessDeath() throws IOException, InterruptedException, ExecutionException {
+    public void testHostProcessDeath() throws IOException, InterruptedException {
         assumeFalse(ImageInfo.inImageRuntimeCode());
         Assume.assumeTrue("Only supported in external (process) isolate mode.", TruffleTestAssumptions.isExternalIsolate());
-        try (ExecutorService worker = Executors.newSingleThreadExecutor()) {
-            AtomicReference<Future<Integer>> killHostProcessTask = new AtomicReference<>();
+        String syncMessage = "[SYNC]";
+        AtomicReference<ProcessHandle> hostProcess = new AtomicReference<>();
+        AtomicReference<ProcessHandle> isolateProcess = new AtomicReference<>();
+        try {
             SubprocessTestUtils.newBuilder(PolyglotIsolateTest.class, () -> {
                 HostAccess accessPolicy = HostAccess.newBuilder(HostAccess.ALL).build();
                 try (Context context = Context.newBuilder("triste").//
@@ -2064,38 +2083,48 @@ public class PolyglotIsolateTest {
                                 build()) {
                     Isolate<?> isolate = (Isolate<?>) TestAPIAccessor.ISOLATE.getIsolate(context.getEngine());
                     assertTrue(isolate instanceof ProcessIsolate);
-                    AsynchronousKillActiveChildProcess hostObject = new AsynchronousKillActiveChildProcess(isolate.getIsolateId(), -1);
+                    AsynchronousKillActiveChildProcess hostObject = new AsynchronousKillActiveChildProcess(isolate.getIsolateId(), -1, String.format("%n%s%d", syncMessage, isolate.getIsolateId()));
                     Value binding = context.getBindings("triste");
                     binding.putMember("hostObject", hostObject);
                     context.eval("triste", "killActiveChildProcess(callback(10),1)");
                 }
-            }).failOnNonZeroExit(false).onStart((processHandle) -> {
-                killHostProcessTask.set(worker.submit(() -> {
-                    ProcessHandle isolateProcess = null;
-                    for (int tries = 0; tries < 15; tries++) {
-                        List<ProcessHandle> children = processHandle.children().toList();
-                        if (children.isEmpty()) {
-                            TimeUnit.SECONDS.sleep(2);
-                        } else {
-                            isolateProcess = children.getFirst();
-                            break;
-                        }
-                    }
-                    if (isolateProcess == null) {
-                        return -1;
-                    }
-                    processHandle.destroyForcibly();
-                    for (int tries = 0; tries < 15; tries++) {
-                        if (isolateProcess.isAlive()) {
-                            TimeUnit.SECONDS.sleep(2);
-                        } else {
-                            return 0;
-                        }
-                    }
-                    return -2;
-                }));
-            }).run();
-            assertEquals(0, (int) killHostProcessTask.get().get());
+            }).failOnNonZeroExit(false).//
+                            onStart(hostProcess::set).//
+                            onOutput((line) -> {
+                                if (line.startsWith(syncMessage)) {
+                                    ProcessHandle processToDestroy = hostProcess.get();
+                                    assertNotNull(processToDestroy);
+                                    long expectedPid = Long.parseLong(line.substring(syncMessage.length()));
+                                    ProcessHandle child = processToDestroy.children().filter((h) -> h.pid() == expectedPid).findFirst().orElse(null);
+                                    isolateProcess.set(child);
+                                    processToDestroy.destroyForcibly();
+                                }
+                            }).onExit((subprocess) -> {
+                                ProcessHandle toCheck = isolateProcess.get();
+                                assertNotNull("Isolate sub-process not found.", toCheck);
+                                int tries;
+                                for (tries = 0; tries < 15; tries++) {
+                                    if (toCheck.isAlive()) {
+                                        try {
+                                            TimeUnit.SECONDS.sleep(2);
+                                        } catch (InterruptedException e) {
+                                            throw new AssertionError(e);
+                                        }
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if (tries == 15) {
+                                    fail("Failed to terminate isolate process.");
+                                }
+                            }).//
+                            run();
+        } finally {
+            // Clean up in case of failure
+            ProcessHandle toClean = isolateProcess.get();
+            if (toClean != null && toClean.isAlive()) {
+                toClean.destroyForcibly();
+            }
         }
     }
 
@@ -2255,6 +2284,89 @@ public class PolyglotIsolateTest {
              */
             int guestToHostCallCount = 10_000;
             ctx.eval("triste", "loopHostCall(newHostObject(" + hostObjectFactory.newHostObject() + ")," + guestToHostCallCount + ")");
+        }
+    }
+
+    @Test
+    public void testNoMethodScopingWarningWithoutIsolation() throws Exception {
+        testScopingWarningImpl(false, HostAccess.ALL, false, false);
+    }
+
+    @Test
+    public void testNoMethodScopingWarningForNoHostAccess() throws Exception {
+        testScopingWarningImpl(true, HostAccess.NONE, false, false);
+    }
+
+    @Test
+    public void testMethodScopingWarningForUnscopedHostAccess() throws Exception {
+        testScopingWarningImpl(true, HostAccess.ALL, false, true);
+    }
+
+    @Test
+    public void testNoMethodScopingWarningForScopedHostAccess() throws Exception {
+        HostAccess scopedHostAccess = HostAccess.newBuilder(HostAccess.ALL).methodScoping(true).build();
+        testScopingWarningImpl(true, scopedHostAccess, false, false);
+    }
+
+    @Test
+    public void testMethodScopingWarningDisabled() throws Exception {
+        testScopingWarningImpl(true, HostAccess.ALL, true, false);
+    }
+
+    private static void testScopingWarningImpl(boolean spawnIsolate, HostAccess hostAccess, boolean disableWarning, boolean expectWarning) throws Exception {
+        assumeFalse(ImageInfo.inImageRuntimeCode());
+        SubprocessTestUtils.Builder builder = SubprocessTestUtils.newBuilder(PolyglotIsolateTest.class, () -> {
+            Context context = Context.newBuilder("triste").allowHostAccess(hostAccess).spawnIsolate(spawnIsolate).build();
+            context.close();
+        });
+        // Remove engine.SpawnIsolate option passed by gates, the test controls spawn isolate itself
+        builder.prefixVmOption(SubprocessTestUtils.markForRemoval(("-Dpolyglot.engine.SpawnIsolate=true")));
+        if (disableWarning) {
+            builder.prefixVmOption("-Dpolyglot.engine.WarnMethodScoping=false");
+        } else {
+            builder.prefixVmOption(SubprocessTestUtils.markForRemoval(("-Dpolyglot.engine.WarnMethodScoping=false")));
+        }
+        builder.onExit((p) -> {
+            assertEquals(expectWarning, p.output.stream().anyMatch((l) -> l.contains("An isolated polyglot context uses host access without host method scoping.")));
+        });
+        builder.run();
+    }
+
+    @Test
+    public void testSymbolCache() throws Exception {
+        try (Context context = Context.newBuilder("triste").option("engine.SpawnIsolate", "true").build()) {
+            String prefix = "method_";
+            Value methods = context.eval("triste", "testSymbolCache(method(" + prefix + "),5000)");
+            Set<String> methodKeys = methods.getMemberKeys();
+            assertEquals(5000, methodKeys.size());
+            for (String key : methodKeys) {
+                int expected = Integer.parseInt(key.substring(prefix.length()));
+                assertEquals(expected, methods.invokeMember(key).asInt());
+                assertEquals(expected, methods.invokeMember(key).asInt());
+            }
+
+            prefix = "field_";
+            Value fields = context.eval("triste", "testSymbolCache(field(" + prefix + "),5000)");
+            Set<String> fieldKeys = fields.getMemberKeys();
+            assertEquals(5000, fieldKeys.size());
+            for (String key : fieldKeys) {
+                int expected = Integer.parseInt(key.substring(prefix.length()));
+                assertEquals(expected, fields.getMember(key).asInt());
+                assertEquals(expected, fields.getMember(key).asInt());
+            }
+
+            int maxSymbolNameLength = (int) ReflectionUtils.getStaticField(Class.forName("com.oracle.truffle.polyglot.isolate.SymbolTable$Source"), "MAX_SYMBOL_NAME_LENGTH");
+            char[] longName = new char[maxSymbolNameLength + 1];
+            Arrays.fill(longName, 'A');
+            prefix = new String(longName);
+            methods = context.eval("triste", "testSymbolCache(method(" + prefix + "),10)");
+            methodKeys = methods.getMemberKeys();
+            assertEquals(10, methodKeys.size());
+            for (String key : methodKeys) {
+                int expected = Integer.parseInt(key.substring(prefix.length()));
+                assertEquals(expected, methods.invokeMember(key).asInt());
+                assertEquals(expected, methods.invokeMember(key).asInt());
+            }
         }
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,26 +40,61 @@
  */
 package com.oracle.truffle.dsl.processor.bytecode.model;
 
+import java.util.Objects;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
  * Models an unresolved instruction in a rewrite pattern.
  */
-public record InstructionPatternModel(InstructionModel instruction, String[] immediates) {
+public record InstructionPatternModel(InstructionModel instruction, ImmediatePattern[] immediates) {
+    public sealed interface ImmediatePattern permits Wildcard, Binding, Literal {
+    }
+
+    public record Wildcard() implements ImmediatePattern {
+        @Override
+        public String toString() {
+            return "_";
+        }
+    }
+
+    public record Binding(String name) implements ImmediatePattern {
+        public Binding {
+            Objects.requireNonNull(name);
+        }
+
+        @Override
+        public String toString() {
+            return name;
+        }
+    }
+
+    public record Literal(long value) implements ImmediatePattern {
+        @Override
+        public String toString() {
+            return Long.toString(value);
+        }
+    }
+
     public InstructionPatternModel {
+        Objects.requireNonNull(instruction);
+        Objects.requireNonNull(immediates);
+        for (ImmediatePattern immediate : immediates) {
+            Objects.requireNonNull(immediate);
+        }
         if (instruction.isInstrumentation()) {
             throw new IllegalArgumentException("Instruction %s is an instrumentation instruction. Instrumentation instructions cannot be used in rewrite rules.".formatted(instruction.getName()));
         }
-        if (immediates.length != instruction.immediates.size()) {
+        if (immediates.length != instruction.getEncodedImmediates().size()) {
             throw new IllegalArgumentException(
-                            "Instruction %s declares %d immediate(s) but %d immediate(s) specified in pattern: %s".formatted(instruction.getName(), instruction.immediates.size(), immediates.length,
-                                            Stream.of(immediates).collect(Collectors.joining(", ", "[", "]"))));
+                            "Instruction %s declares %d immediate(s) but %d immediate(s) specified in pattern: %s".formatted(instruction.getName(), instruction.getEncodedImmediates().size(),
+                                            immediates.length,
+                                            Stream.of(immediates).map(Object::toString).collect(Collectors.joining(", ", "[", "]"))));
         }
     }
 
     @Override
     public final String toString() {
-        return "%s(%s)".formatted(instruction.getName(), Stream.of(immediates).map(r -> (r == null) ? "_" : r).collect(Collectors.joining(", ")));
+        return "%s(%s)".formatted(instruction.getName(), Stream.of(immediates).map(Object::toString).collect(Collectors.joining(", ")));
     }
 }

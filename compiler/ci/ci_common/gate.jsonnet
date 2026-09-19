@@ -134,8 +134,8 @@
   test_javabase:: s.base("build,javabasetest"),
   test_jtt_phaseplan_fuzzing:: s.base("build,phaseplan-fuzz-jtt-tests"),
   test_vec16:: s.base(extra_vm_args="-Djdk.graal.DetailedAsserts=true -XX:MaxVectorSize=16"),
-  test_avx0:: s.base(extra_vm_args="-Djdk.graal.ForceAdversarialLayout=true", jvm_config_suffix="-avx0"),
-  test_avx1:: s.base(extra_vm_args="-Djdk.graal.ForceAdversarialLayout=true", jvm_config_suffix="-avx1"),
+  test_avx0:: s.base(extra_vm_args="-Djdk.graal.ForceAdversarialLayout=true -XX:UseAVX=0", jvm_config_suffix="-avx0"),
+  test_avx1:: s.base(extra_vm_args="-Djdk.graal.ForceAdversarialLayout=true -XX:UseAVX=1", jvm_config_suffix="-avx1"),
 
   # Runs truffle tests in a mode similar to HotSpot's -Xcomp option
   # (i.e. compile immediately without background compilation).
@@ -239,7 +239,6 @@
   # Candidates for Tier3 jobs. In CE, these will be dailies.
   local tier3_jobs = {
     "compiler-unittest_compiler-labsjdk-latest-darwin-aarch64": t("45:00"),
-    "compiler-unittest_truffle-labsjdk-latest-darwin-aarch64": t("45:00"),
     "compiler-unittest_compiler-labsjdk-latest-linux-aarch64": t("45:00"),
     "compiler-unittest_truffle-labsjdk-latest-linux-aarch64": t("45:00"),
 
@@ -283,6 +282,8 @@
   # fields of the denoted build.
   local dailies = {
     "compiler-test-labsjdk-latest-windows-amd64": {},
+
+    "compiler-unittest_truffle-labsjdk-latest-darwin-aarch64": t("45:00"),
 
     "compiler-test_zgc-labsjdk-latest-darwin-aarch64": {},
     "compiler-test_zgc-labsjdk-latest-linux-aarch64": t("2:30:00"),

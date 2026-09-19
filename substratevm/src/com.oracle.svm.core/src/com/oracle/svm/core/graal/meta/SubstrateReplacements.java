@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -51,7 +51,7 @@ import com.oracle.svm.core.meta.SharedMethod;
 import com.oracle.svm.core.meta.SharedType;
 import com.oracle.svm.shared.option.HostedOptionValues;
 import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.util.AnnotationUtil;
+import com.oracle.svm.util.GuestAnnotationAccess;
 
 import jdk.graal.compiler.api.replacements.Snippet;
 import jdk.graal.compiler.bytecode.BytecodeProvider;
@@ -237,7 +237,7 @@ public class SubstrateReplacements extends ReplacementsImpl {
 
             EncodedGraph encodedGraph = new EncodedGraph(snippetEncoding, startOffset, snippetObjects, snippetNodeClasses, result);
             PEGraphDecoder graphDecoder = new PEGraphDecoder(SubstrateTarget.getArchitecture(), result, providers, null, snippetPlugins, new InlineInvokePlugin[0], parameterPlugin, null,
-                            null, null, new ConcurrentHashMap<>(), new ConcurrentHashMap<>(), true, false) {
+                            null, new ConcurrentHashMap<>(), new ConcurrentHashMap<>(), true, false) {
 
                 private final IntrinsicContext intrinsic = new IntrinsicContext(method, null, providers.getReplacements().getDefaultReplacementBytecodeProvider(), INLINE_AFTER_PARSING, false);
 
@@ -275,7 +275,7 @@ public class SubstrateReplacements extends ReplacementsImpl {
     @Platforms(Platform.HOSTED_ONLY.class)
     @Override
     public void registerSnippet(ResolvedJavaMethod method, ResolvedJavaMethod original, Object receiver, boolean trackNodeSourcePosition, OptionValues options) {
-        assert AnnotationUtil.isAnnotationPresent(method, Snippet.class) : "Snippet must be annotated with @" + Snippet.class.getSimpleName() + " " + method;
+        assert GuestAnnotationAccess.isAnnotationPresent(method, Snippet.class) : "Snippet must be annotated with @" + Snippet.class.getSimpleName() + " " + method;
         assert method.hasBytecodes() : "Snippet must not be abstract or native";
         assert builder.graphs.get(method) == null : "snippet registered twice: " + method.getName();
         assert builder.registered.add(method) : "snippet registered twice: " + method.getName();

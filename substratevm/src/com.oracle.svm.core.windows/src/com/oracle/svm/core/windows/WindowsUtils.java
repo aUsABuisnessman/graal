@@ -47,7 +47,7 @@ import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.RecomputeFieldValue;
 import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.guest.staging.c.function.CEntryPointActions;
-import com.oracle.svm.core.graal.stackvalue.UnsafeStackValue;
+import com.oracle.svm.guest.staging.core.graal.stackvalue.UnsafeStackValue;
 import com.oracle.svm.core.handles.PrimitiveArrayView;
 import com.oracle.svm.shared.util.BasedOnJDKFile;
 import com.oracle.svm.core.windows.headers.FileAPI;
@@ -189,8 +189,8 @@ public class WindowsUtils {
 
     /** Retrieve a nanosecond counter for elapsed time measurement. */
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+26/src/hotspot/os/windows/os_windows.cpp#L1089-L1096")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+26/src/hotspot/os/windows/os_windows.cpp#L1194-L1200")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-23+26/src/hotspot/os/windows/os_windows.cpp#L1089-L1096")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-23+26/src/hotspot/os/windows/os_windows.cpp#L1194-L1200")
     public static long getNanoCounter() {
         CLongPointer count = StackValue.get(CLongPointer.class);
         if (nanosPerCount == 0d) {

@@ -44,7 +44,7 @@ import org.graalvm.word.PointerBase;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.SubstrateGCOptions;
+import com.oracle.svm.guest.staging.SubstrateGCOptions;
 import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.c.BooleanPointer;
 import com.oracle.svm.core.config.ObjectLayout;
@@ -56,7 +56,7 @@ import com.oracle.svm.core.genscavenge.graal.nodes.FormatPodNode;
 import com.oracle.svm.core.genscavenge.graal.nodes.FormatStoredContinuationNode;
 import com.oracle.svm.core.heap.OutOfMemoryUtil;
 import com.oracle.svm.core.heap.Pod;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.heap.StoredContinuation;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.hub.LayoutEncoding;
@@ -64,13 +64,13 @@ import com.oracle.svm.core.jfr.HasJfrSupport;
 import com.oracle.svm.core.jfr.JfrTicks;
 import com.oracle.svm.core.jfr.SubstrateJVM;
 import com.oracle.svm.core.jfr.events.JfrAllocationEvents;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.core.thread.ContinuationSupport;
 import com.oracle.svm.guest.staging.core.threadlocal.FastThreadLocal;
 import com.oracle.svm.guest.staging.core.threadlocal.FastThreadLocalBytes;
 import com.oracle.svm.guest.staging.core.threadlocal.FastThreadLocalFactory;
 import com.oracle.svm.guest.staging.core.threadlocal.FastThreadLocalWord;
-import com.oracle.svm.core.util.UnsignedUtils;
+import com.oracle.svm.shared.util.UnsignedUtils;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.util.BasedOnJDKFile;
 import com.oracle.svm.shared.util.SubstrateUtil;
@@ -241,11 +241,9 @@ public final class ThreadLocalAllocation {
         BooleanPointer allocatedOutsideTlab = StackValue.get(BooleanPointer.class);
         allocatedOutsideTlab.write(false);
 
-        try {
-            return allocateInstanceSlow(hub, size, allocatedOutsideTlab);
-        } finally {
-            JfrAllocationEvents.emit(startTicks, hub, size, getTlabSize(), allocatedOutsideTlab.read());
-        }
+        Object result = allocateInstanceSlow(hub, size, allocatedOutsideTlab);
+        JfrAllocationEvents.emit(startTicks, hub, size, getTlabSize(), allocatedOutsideTlab.read());
+        return result;
     }
 
     public static Object slowPathNewArrayLikeObject(Word objectHeader, int length, byte[] podReferenceMap) {
@@ -288,35 +286,34 @@ public final class ThreadLocalAllocation {
         BooleanPointer allocatedOutsideTlab = StackValue.get(BooleanPointer.class);
         allocatedOutsideTlab.write(false);
 
-        try {
-            if (!GenScavengeAllocationSupport.arrayAllocatedInAlignedChunk(size)) {
-                /*
-                 * Large arrays go into their own unaligned chunk. Only arrays and stored
-                 * continuations may be allocated in an unaligned chunk.
-                 */
-                int layoutEncoding = hub.getLayoutEncoding();
-                assert LayoutEncoding.isArray(layoutEncoding) || StoredContinuation.class.isAssignableFrom(DynamicHub.toClass(hub));
+        Object array;
+        if (!GenScavengeAllocationSupport.arrayAllocatedInAlignedChunk(size)) {
+            /*
+             * Large arrays go into their own unaligned chunk. Only arrays and stored continuations
+             * may be allocated in an unaligned chunk.
+             */
+            int layoutEncoding = hub.getLayoutEncoding();
+            assert LayoutEncoding.isArray(layoutEncoding) || StoredContinuation.class.isAssignableFrom(DynamicHub.toClass(hub));
 
-                boolean needsZeroing = !HeapChunkProvider.areUnalignedChunksZeroed();
-                UnalignedHeapChunk.UnalignedHeader newTlabChunk = HeapImpl.getChunkProvider().produceUnalignedChunk(size);
-                tlabSize = HeapChunk.getSize(newTlabChunk);
-                return allocateLargeArrayLikeObjectInNewTlab(hub, length, size, newTlabChunk, needsZeroing, podReferenceMap);
-            }
-
+            boolean needsZeroing = !HeapChunkProvider.areUnalignedChunksZeroed();
+            UnalignedHeapChunk.UnalignedHeader newTlabChunk = HeapImpl.getChunkProvider().produceUnalignedChunk(size);
+            tlabSize = HeapChunk.getSize(newTlabChunk);
+            array = allocateLargeArrayLikeObjectInNewTlab(hub, length, size, newTlabChunk, needsZeroing, podReferenceMap);
+        } else {
             /*
              * Small arrays go into the regular aligned chunk. We might have allocated in the caller
              * and acquired a TLAB with enough space already (but we need to check in an
              * uninterruptible method to be safe).
              */
-            Object array = allocateSmallArrayLikeObjectInCurrentTlab(hub, length, size, podReferenceMap);
+            array = allocateSmallArrayLikeObjectInCurrentTlab(hub, length, size, podReferenceMap);
             if (array == null) {
                 array = allocateArraySlow(hub, length, size, podReferenceMap, allocatedOutsideTlab);
             }
             tlabSize = getTlabSize();
-            return array;
-        } finally {
-            JfrAllocationEvents.emit(startTicks, hub, size, tlabSize, allocatedOutsideTlab.read());
         }
+
+        JfrAllocationEvents.emit(startTicks, hub, size, tlabSize, allocatedOutsideTlab.read());
+        return array;
     }
 
     @Uninterruptible(reason = "Holds uninitialized memory.")
@@ -351,7 +348,7 @@ public final class ThreadLocalAllocation {
         return formatArrayLikeObject(memory, hub, length, false, FillContent.WITH_ZEROES, podReferenceMap);
     }
 
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23-ga/src/hotspot/share/gc/shared/memAllocator.cpp#L333-L341")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-23-ga/src/hotspot/share/gc/shared/memAllocator.cpp#L333-L341")
     @Uninterruptible(reason = "Holds uninitialized memory.")
     private static Pointer allocateRawMemory(UnsignedWord size, BooleanPointer allocatedOutsideTlab) {
         Pointer memory = TlabSupport.allocateRawMemoryInTlabSlow(size);
@@ -361,7 +358,7 @@ public final class ThreadLocalAllocation {
         return allocateRawMemoryOutsideTlab(size, allocatedOutsideTlab);
     }
 
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+25/src/hotspot/share/gc/shared/memAllocator.cpp#L239-L251")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+25/src/hotspot/share/gc/shared/memAllocator.cpp#L239-L251")
     @Uninterruptible(reason = "Holds uninitialized memory.")
     private static Pointer allocateRawMemoryOutsideTlab(UnsignedWord size, BooleanPointer allocatedOutsideTlab) {
         allocatedOutsideTlab.write(true);

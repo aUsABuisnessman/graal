@@ -24,15 +24,14 @@
  */
 package com.oracle.svm.hosted;
 
-import com.oracle.svm.core.service.AutomaticallyRegisteredServiceRegistration;
-import com.oracle.svm.util.GuestAccess;
-import org.graalvm.nativeimage.AnnotationAccess;
-
 import java.lang.annotation.Annotation;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.ServiceLoader;
+
+import com.oracle.svm.core.service.AutomaticallyRegisteredServiceRegistration;
+import org.graalvm.nativeimage.AnnotationAccess;
 
 /**
  * Shared support for automatic-registration handlers that reconcile generated {@link ServiceLoader}
@@ -96,7 +95,7 @@ abstract class AutomaticallyRegisteredClassSupport<S extends AutomaticallyRegist
             } catch (IllegalStateException ex) {
                 throw missingClassError(ex.getCause(), className);
             }
-            if (AnnotationAccess.getAnnotation(registeredClass, annotationClass()) == null) {
+            if (!AnnotationAccess.isAnnotationPresent(registeredClass, annotationClass())) {
                 throw staleGeneratedRegistrationError(registeredClass);
             }
             /*
@@ -118,10 +117,10 @@ abstract class AutomaticallyRegisteredClassSupport<S extends AutomaticallyRegist
         }
     }
 
-    final List<Class<?>> findMostSpecificClasses(Class<?> baseClass, Iterable<Class<?>> candidateClasses) {
+    static final List<Class<?>> findMostSpecificClasses(Class<?> baseClass, Iterable<Class<?>> candidateClasses) {
         ArrayList<Class<?>> candidates = new ArrayList<>();
         for (Class<?> candidateClass : candidateClasses) {
-            if (isAssignableFrom(baseClass, candidateClass)) {
+            if (baseClass.isAssignableFrom(candidateClass)) {
                 candidates.add(candidateClass);
             }
         }
@@ -129,17 +128,13 @@ abstract class AutomaticallyRegisteredClassSupport<S extends AutomaticallyRegist
         return candidates;
     }
 
-    private boolean hasMoreSpecificCandidate(Class<?> candidate, List<Class<?>> candidates) {
+    private static boolean hasMoreSpecificCandidate(Class<?> candidate, List<Class<?>> candidates) {
         for (Class<?> other : candidates) {
-            if (candidate != other && isAssignableFrom(candidate, other)) {
+            if (candidate != other && candidate.isAssignableFrom(other)) {
                 return true;
             }
         }
         return false;
     }
 
-    @SuppressWarnings("static-method")
-    private boolean isAssignableFrom(Class<?> supertype, Class<?> subtype) {
-        return GuestAccess.get().lookupType(supertype).isAssignableFrom(GuestAccess.get().lookupType(subtype));
-    }
 }

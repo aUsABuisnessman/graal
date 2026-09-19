@@ -47,11 +47,13 @@ import com.oracle.svm.configure.config.ConfigurationFileCollection;
 import com.oracle.svm.configure.config.ConfigurationMemberInfo;
 import com.oracle.svm.configure.config.ConfigurationSet;
 import com.oracle.svm.configure.config.ConfigurationType;
+import com.oracle.svm.core.MissingRegistrationUtils;
+import com.oracle.svm.core.configure.RuntimeDynamicAccessMetadata;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
-import com.oracle.svm.core.jdk.RuntimeSupport;
-import com.oracle.svm.core.log.Log;
-import com.oracle.svm.core.option.RuntimeOptionKey;
+import com.oracle.svm.guest.staging.jdk.RuntimeSupport;
+import com.oracle.svm.guest.staging.log.Log;
+import com.oracle.svm.guest.staging.option.RuntimeOptionKey;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.shared.AlwaysInline;
 import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
@@ -59,10 +61,8 @@ import com.oracle.svm.shared.option.HostedOptionKey;
 import com.oracle.svm.shared.option.OptionUtils;
 import com.oracle.svm.shared.option.SubstrateOptionsParser;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.Disallowed;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.DisallowLayered;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.SingleLayer;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.StringUtil;
 import com.oracle.svm.shared.util.VMError;
@@ -72,11 +72,11 @@ import jdk.graal.compiler.options.OptionStability;
 
 /**
  * Implements reachability metadata tracing during native image execution. Enabling
- * {@link Options#MetadataTracingSupport} at build time will generate code to trace all accesses of
- * reachability metadata, and then the run-time option {@link Options#TraceMetadata} enables
- * tracing.
+ * {@link Options#MetadataTracingSupport} at build time will generate code to trace selected
+ * accesses of reachability metadata, and then the run-time option {@link Options#TraceMetadata}
+ * enables tracing.
  */
-@SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
+@SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, other = DisallowLayered.class)
 public final class MetadataTracer {
 
     public static class Options {
@@ -86,6 +86,7 @@ public final class MetadataTracer {
 
         static final String TRACE_METADATA_HELP = """
                         Enables metadata tracing at run time. This option is only supported if -H:+MetadataTracingSupport is set when building the image.
+                        The tracer emits only metadata that was preserved with -H:Preserve, or metadata that is missing completely.
                         The value of this option is a comma-separated list of arguments specified as key-value pairs. The following arguments are supported:
 
                         - path=<trace-output-directory> (required): Specifies the directory to write traced metadata to.
@@ -94,8 +95,8 @@ public final class MetadataTracer {
                           output format may change at any time.
 
                         Example usage:
-                            -H:TraceMetadata=path=trace_output_directory
-                            -H:TraceMetadata=path=trace_output_directory,merge=false
+                            -XX:TraceMetadata=path=trace_output_directory
+                            -XX:TraceMetadata=path=trace_output_directory,merge=false
                         """;
 
         @Option(help = TRACE_METADATA_HELP, stability = OptionStability.EXPERIMENTAL)//
@@ -173,6 +174,19 @@ public final class MetadataTracer {
     }
 
     /**
+     * Returns whether an access to the provided metadata should be traced. The tracer emits
+     * metadata only for image contents brought in by {@code -H:Preserve}, or for accesses with no
+     * matching metadata at all.
+     */
+    public static boolean shouldTraceMetadata(RuntimeDynamicAccessMetadata dynamicAccessMetadata) {
+        return dynamicAccessMetadata == null || dynamicAccessMetadata.isPreserved();
+    }
+
+    public static boolean shouldTraceMetadata(boolean metadataMissing, boolean metadataPreserved) {
+        return metadataMissing || metadataPreserved;
+    }
+
+    /**
      * Returns whether tracing is enabled at run time (using {@code -XX:TraceMetadata}).
      */
     private boolean enabledAtRunTime() {
@@ -207,9 +221,13 @@ public final class MetadataTracer {
     }
 
     public void traceReflectionArrayType(Class<?> componentClazz) {
+        traceReflectionArrayType(componentClazz, 1);
+    }
+
+    public void traceReflectionArrayType(Class<?> componentClazz, int dimensions) {
         ConfigurationTypeDescriptor typeDescriptor = ConfigurationTypeDescriptor.fromClass(componentClazz);
         if (typeDescriptor instanceof NamedConfigurationTypeDescriptor(String name)) {
-            traceReflectionType(name + "[]");
+            traceReflectionType(name + "[]".repeat(dimensions));
         } else {
             debug("array type not registered for reflection (component type is not a named type)", typeDescriptor);
         }
@@ -421,12 +439,16 @@ public final class MetadataTracer {
             return UnresolvedAccessCondition.unconditional();
         }
         try (var _ = new DisableTracingImpl("condition stack trace")) {
-            return conditionStackWalker.walk(stackFrames -> stackFrames
+            /*
+             * Stack walking can perform internal dynamic accesses. They are implementation details
+             * and must neither be traced nor reported as missing metadata.
+             */
+            return MissingRegistrationUtils.runIgnoringMissingRegistrations(() -> conditionStackWalker.walk(stackFrames -> stackFrames
                             .map(StackWalker.StackFrame::getClassName)
                             .filter(this::matchesConditionPackagePrefix)
                             .findFirst()
                             .map(className -> UnresolvedAccessCondition.create(NamedConfigurationTypeDescriptor.fromTypeName(className))))
-                            .orElse(null);
+                            .orElse(null));
         }
     }
 
@@ -702,7 +724,6 @@ final class TraceConditionPackagePrefixes {
 }
 
 @AutomaticallyRegisteredFeature
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = SingleLayer.class)
 class MetadataTracerFeature implements InternalFeature {
     @Override
     public boolean isInConfiguration(IsInConfigurationAccess access) {

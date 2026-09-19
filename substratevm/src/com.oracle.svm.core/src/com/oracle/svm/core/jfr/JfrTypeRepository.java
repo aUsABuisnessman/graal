@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core.jfr;
 
-import static com.oracle.svm.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
+import static com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
 import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
 import java.util.HashMap;
@@ -42,18 +42,18 @@ import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.UnmanagedMemoryUtil;
-import com.oracle.svm.core.c.struct.PinnedObjectField;
+import com.oracle.svm.guest.staging.core.UnmanagedMemoryUtil;
+import com.oracle.svm.guest.staging.core.c.struct.PinnedObjectField;
 import com.oracle.svm.core.collections.AbstractUninterruptibleHashtable;
 import com.oracle.svm.core.collections.UninterruptibleEntry;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.headers.LibC;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.hub.LayoutEncoding;
 import com.oracle.svm.core.jdk.UninterruptibleUtils;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.core.jfr.traceid.JfrTraceId;
-import com.oracle.svm.core.jfr.traceid.JfrTraceIdEpoch;
+import com.oracle.svm.core.jfr.traceid.JfrEpoch;
 import com.oracle.svm.core.locks.VMMutex;
 import com.oracle.svm.core.memory.NullableNativeMemory;
 import com.oracle.svm.core.nmt.NmtCategory;
@@ -128,7 +128,7 @@ public class JfrTypeRepository implements JfrRepository {
 
     @Uninterruptible(reason = "Result is only valid until epoch changes.")
     private JfrClassInfoTable getEpochData0(boolean previousEpoch) {
-        boolean epoch = previousEpoch ? JfrTraceIdEpoch.getInstance().previousEpoch() : JfrTraceIdEpoch.getInstance().currentEpoch();
+        boolean epoch = previousEpoch ? JfrEpoch.getInstance().previousEpoch() : JfrEpoch.getInstance().currentEpoch();
         return epoch ? epochTypeData0 : epochTypeData1;
     }
 
@@ -815,12 +815,12 @@ public class JfrTypeRepository implements JfrRepository {
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     private static int getIdHash(long value) {
-        return UninterruptibleUtils.Long.hashCode(value);
+        return com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils.Long.hashCode(value);
     }
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     private static int getObjectHash(Object object) {
-        return object == null ? 0 : UninterruptibleUtils.Long.hashCode(Word.objectToUntrackedPointer(object).rawValue());
+        return object == null ? 0 : com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils.Long.hashCode(Word.objectToUntrackedPointer(object).rawValue());
     }
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
@@ -829,7 +829,7 @@ public class JfrTypeRepository implements JfrRepository {
         for (int i = 0; length.aboveThan(i); i++) {
             sum += buffer.readByte(i);
         }
-        return 31 * UninterruptibleUtils.Long.hashCode(sum) + getIdHash(moduleId);
+        return 31 * com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils.Long.hashCode(sum) + getIdHash(moduleId);
     }
 
     private static final class PackageKey {

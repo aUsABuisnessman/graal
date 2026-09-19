@@ -33,7 +33,7 @@ import com.oracle.svm.core.CalleeSavedRegisters;
 import com.oracle.svm.core.ReservedRegisters;
 import com.oracle.svm.core.code.CodeInfoEncoder.Encoders;
 import com.oracle.svm.core.hub.DynamicHub;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.core.meta.SharedMethod;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.util.SubstrateUtil;
@@ -93,7 +93,7 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
         DefaultConstant(false),
 
         /**
-         * A {@link VirtualObject}. The The {@link ValueInfo#data} is the id of the virtual object,
+         * A {@link VirtualObject}. The {@link ValueInfo#data} is the id of the virtual object,
          * i.e., the index into the {@link #virtualObjects}.
          */
         VirtualObject(true);
@@ -121,6 +121,7 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
         /**
          * Returns the type of the value, describing how to access the value.
          */
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
         public ValueType getType() {
             return type;
         }
@@ -220,7 +221,6 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
     /* These are used only for constructing/encoding the code and frame info, or as cache. */
     private ResolvedJavaMethod sourceMethod;
 
-    private int sourceMethodModifiers;
     private String sourceMethodSignature;
 
     public FrameInfoQueryResult() {
@@ -245,7 +245,6 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
         sourceMethodId = 0;
         sourceMethod = null;
         sourceMethodSignature = Encoders.INVALID_METHOD_SIGNATURE;
-        sourceMethodModifiers = Encoders.INVALID_METHOD_MODIFIERS;
     }
 
     /**
@@ -258,9 +257,17 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
     }
 
     /**
-     * Returns the deoptimization target method, or {@code null} if not available. Only use the
-     * result for debug printing, since it is not available in all cases.
+     * Returns the deoptimization target method, or {@code null} if not available. In general this
+     * is optional metadata and should only be used for debug printing.
+     * <p>
+     * Runtime-installed interpreter frames are the qualified exception: the runtime frame-info
+     * encoder stores the {@link SharedMethod} whenever it has an interpreter counterpart, even
+     * when no AOT deoptimization target exists. Ristretto's lazy-deoptimization stub selector may
+     * therefore require a non-null Ristretto method after it has established that the instruction
+     * pointer belongs to installed code with an interpreter deoptimization target. Consumers must
+     * enforce that path-specific invariant rather than extending it to arbitrary AOT frame info.
      */
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public SharedMethod getDeoptMethod() {
         return deoptMethod;
     }
@@ -324,6 +331,16 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
      */
     public FrameState.StackState getStackState() {
         return FrameState.StackState.of(FrameInfoDecoder.decodeDuringCall(encodedBci), FrameInfoDecoder.decodeRethrowException(encodedBci));
+    }
+
+    /**
+     * Returns whether this frame records the post-invoke state that can carry a pending normal
+     * return value. Used while selecting the lazy-deoptimization stub before that value is rooted.
+     */
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public boolean isAfterPop() {
+        return (encodedBci & FrameInfoDecoder.ENCODED_BCI_DURING_CALL_MASK) != 0 &&
+                        (encodedBci & FrameInfoDecoder.ENCODED_BCI_RETHROW_EXCEPTION_MASK) == 0;
     }
 
     /**
@@ -393,13 +410,13 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     @SuppressFBWarnings(value = "ES_COMPARING_STRINGS_WITH_EQ", justification = "Identity comparison against sentinel string value")
-    void setSourceFields(Class<?> clazz, String methodName, String signature, int modifiers) {
+    void setSourceFields(Class<?> clazz, String methodName, String signature, int flags) {
         assert sourceClass == Encoders.INVALID_CLASS && sourceMethodName == Encoders.INVALID_METHOD_NAME && sourceMethodSignature == Encoders.INVALID_METHOD_SIGNATURE &&
-                        sourceMethodModifiers == Encoders.INVALID_METHOD_MODIFIERS;
+                        sourceMethodFlags == Encoders.INVALID_METHOD_MODIFIERS;
         this.sourceClass = clazz;
         this.sourceMethodName = methodName;
         this.sourceMethodSignature = signature;
-        this.sourceMethodModifiers = modifiers;
+        this.sourceMethodFlags = flags;
     }
 
     ResolvedJavaMethod getSourceMethod() {
@@ -421,12 +438,6 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public int getSourceMethodId() {
         return sourceMethodId;
-    }
-
-    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    public int getSourceMethodModifiers() {
-        fillSourceFieldsIfMissing();
-        return sourceMethodModifiers;
     }
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)

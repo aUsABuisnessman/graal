@@ -24,28 +24,28 @@
  */
 package com.oracle.svm.hosted.heap;
 
-import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.image.DefaultImageHeapObjectSorter;
 import com.oracle.svm.core.image.ImageHeapObjectSorter;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits;
-import com.oracle.svm.shared.singletons.traits.SingletonTraits;
+import com.oracle.svm.hosted.FeatureImpl.BeforeHeapLayoutAccessImpl;
+import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
+import jdk.vm.ci.meta.MetaAccessProvider;
 import org.graalvm.nativeimage.ImageSingletons;
 
 /**
  * Feature for selecting the order in which objects in the image heap are sorted during image
  * generation.
  */
-@SingletonTraits(access = BuiltinTraits.BuildtimeAccessOnly.class, layeredCallbacks = BuiltinTraits.NoLayeredCallbacks.class)
 @AutomaticallyRegisteredFeature
 public class ImageHeapObjectSortFeature implements InternalFeature {
 
     @Override
     public void beforeHeapLayout(BeforeHeapLayoutAccess access) {
-        ImageSingletons.add(ImageHeapObjectSorter.class, createImageHeapObjectSorter());
+        MetaAccessProvider metaAccess = ((BeforeHeapLayoutAccessImpl) access).getMetaAccess();
+        ImageSingletons.add(ImageHeapObjectSorter.class, createImageHeapObjectSorter(metaAccess));
     }
 
-    protected ImageHeapObjectSorter createImageHeapObjectSorter() {
-        return new DefaultImageHeapObjectSorter();
+    protected ImageHeapObjectSorter createImageHeapObjectSorter(MetaAccessProvider metaAccess) {
+        return new DefaultImageHeapObjectSorter(metaAccess);
     }
 }

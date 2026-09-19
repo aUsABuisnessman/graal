@@ -41,6 +41,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -67,8 +68,9 @@ import com.oracle.graal.pointsto.reports.ReportUtils;
 import com.oracle.graal.pointsto.util.CompletionExecutor;
 import com.oracle.objectfile.ObjectFile;
 import com.oracle.svm.common.meta.MethodVariant;
-import com.oracle.svm.core.BuildPhaseProvider;
+import com.oracle.svm.shared.BuildPhaseProvider;
 import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.code.CodeInfo;
 import com.oracle.svm.core.code.CodeInfoAccess;
 import com.oracle.svm.core.code.CodeInfoEncoder;
@@ -78,6 +80,7 @@ import com.oracle.svm.core.code.FrameInfoDecoder;
 import com.oracle.svm.core.code.FrameInfoDecoder.ConstantAccess;
 import com.oracle.svm.core.code.FrameInfoEncoder;
 import com.oracle.svm.core.code.FrameInfoQueryResult;
+import com.oracle.svm.core.code.FrameSourceInfo;
 import com.oracle.svm.core.code.ImageCodeInfo.HostedImageCodeInfo;
 import com.oracle.svm.core.configure.ConditionalRuntimeValue;
 import com.oracle.svm.core.deopt.DeoptEntryInfopoint;
@@ -123,6 +126,7 @@ import jdk.vm.ci.code.BytecodePosition;
 import jdk.vm.ci.code.site.Call;
 import jdk.vm.ci.code.site.ConstantReference;
 import jdk.vm.ci.code.site.DataPatch;
+import jdk.vm.ci.code.site.DataSectionReference;
 import jdk.vm.ci.code.site.Infopoint;
 import jdk.vm.ci.meta.Constant;
 import jdk.vm.ci.meta.JavaConstant;
@@ -198,6 +202,10 @@ public abstract class NativeImageCodeCache {
         return true;
     }
 
+    public NativeImageHeap getImageHeap() {
+        return imageHeap;
+    }
+
     public int getCodeAreaSize() {
         assert codeAreaSize >= 0;
         return codeAreaSize;
@@ -261,6 +269,15 @@ public abstract class NativeImageCodeCache {
     public List<Pair<HostedMethod, CompilationResult>> getOrderedCompilations() {
         assert orderedCompilations != null;
         return orderedCompilations;
+    }
+
+    /**
+     * Builds the image-wide data section's emitted-item view for resolving
+     * {@link DataSectionReference data-section references} after merging all per-compilation data
+     * sections.
+     */
+    public DataSection.EmittedItems buildDataSectionEmittedItems() {
+        return dataSection.buildEmittedItems(HostedOptionValues.singleton().get(), 1, SubstrateTarget.getArchitecture().getByteOrder());
     }
 
     /**
@@ -451,19 +468,31 @@ public abstract class NativeImageCodeCache {
             runtimeMetadataEncoder.addClassLookupError(type, error);
         });
 
-        reflectionSupport.getFieldLookupErrors().forEach((clazz, error) -> {
+        Map<Class<?>, Throwable> declaredFieldLookupErrors = reflectionSupport.getDeclaredFieldLookupErrors();
+        Map<Class<?>, Throwable> publicFieldLookupErrors = reflectionSupport.getPublicFieldLookupErrors();
+        Set<Class<?>> fieldLookupErrorClasses = new HashSet<>(declaredFieldLookupErrors.keySet());
+        fieldLookupErrorClasses.addAll(publicFieldLookupErrors.keySet());
+        fieldLookupErrorClasses.forEach(clazz -> {
             HostedType type = hMetaAccess.lookupJavaType(clazz);
-            runtimeMetadataEncoder.addFieldLookupError(type, error);
+            runtimeMetadataEncoder.addFieldLookupErrors(type, declaredFieldLookupErrors.get(clazz), publicFieldLookupErrors.get(clazz));
         });
 
-        reflectionSupport.getMethodLookupErrors().forEach((clazz, error) -> {
+        Map<Class<?>, Throwable> declaredMethodLookupErrors = reflectionSupport.getDeclaredMethodLookupErrors();
+        Map<Class<?>, Throwable> publicMethodLookupErrors = reflectionSupport.getPublicMethodLookupErrors();
+        Set<Class<?>> methodLookupErrorClasses = new HashSet<>(declaredMethodLookupErrors.keySet());
+        methodLookupErrorClasses.addAll(publicMethodLookupErrors.keySet());
+        methodLookupErrorClasses.forEach(clazz -> {
             HostedType type = hMetaAccess.lookupJavaType(clazz);
-            runtimeMetadataEncoder.addMethodLookupError(type, error);
+            runtimeMetadataEncoder.addMethodLookupErrors(type, declaredMethodLookupErrors.get(clazz), publicMethodLookupErrors.get(clazz));
         });
 
-        reflectionSupport.getConstructorLookupErrors().forEach((clazz, error) -> {
+        Map<Class<?>, Throwable> declaredConstructorLookupErrors = reflectionSupport.getDeclaredConstructorLookupErrors();
+        Map<Class<?>, Throwable> publicConstructorLookupErrors = reflectionSupport.getPublicConstructorLookupErrors();
+        Set<Class<?>> constructorLookupErrorClasses = new HashSet<>(declaredConstructorLookupErrors.keySet());
+        constructorLookupErrorClasses.addAll(publicConstructorLookupErrors.keySet());
+        constructorLookupErrorClasses.forEach(clazz -> {
             HostedType type = hMetaAccess.lookupJavaType(clazz);
-            runtimeMetadataEncoder.addConstructorLookupError(type, error);
+            runtimeMetadataEncoder.addConstructorLookupErrors(type, declaredConstructorLookupErrors.get(clazz), publicConstructorLookupErrors.get(clazz));
         });
 
         reflectionSupport.getRecordComponentLookupErrors().forEach((clazz, error) -> {
@@ -783,7 +812,7 @@ public abstract class NativeImageCodeCache {
 
     /*
      * Constants and code objects are all assigned offsets in the heap. Reference constants can
-     * refer to other heap objects. TODO: is it true that that all code-->data references go via a
+     * refer to other heap objects. TODO: is it true that all code-->data references go via a
      * Constant? It appears so, but I'm not sure. -srk
      */
 
@@ -863,6 +892,15 @@ public abstract class NativeImageCodeCache {
         }
 
         @Override
+        protected int computeSourceMethodFlags(ResolvedJavaMethod method, boolean isHidden, boolean isLambdaFormCompiled) {
+            return FrameSourceInfo.MethodFlags.computeSourceMethodFlags(method.getModifiers(), isHidden, isLambdaFormCompiled, isInterpreterBytecodeHandlerStub(method));
+        }
+
+        private static boolean isInterpreterBytecodeHandlerStub(ResolvedJavaMethod method) {
+            return InterpreterSupport.isEnabled() && InterpreterSupport.singleton().isInterpreterBytecodeHandlerStub(method);
+        }
+
+        @Override
         protected boolean storeDeoptTargetMethod() {
             return false;
         }
@@ -885,20 +923,22 @@ public abstract class NativeImageCodeCache {
 
         @Override
         protected boolean includeLocalValues(ResolvedJavaMethod method, Infopoint infopoint, boolean isDeoptEntry) {
-            if (isDeoptEntry || ((HostedMethod) method).compilationInfo.canDeoptForTesting()) {
+            if (isDeoptEntry || ((HostedMethod) method).compilationInfo.canDeoptForTesting() || isInterpreterBytecodeHandlerStub(method)) {
                 /*
-                 * Need to restore locals from deoptimization source.
+                 * Need to restore locals from deoptimization source, or preserve the threaded
+                 * handler arguments used by stack walking.
                  */
                 return true;
             }
 
             BytecodeFrame topFrame = infopoint.debugInfo.frame();
             for (BytecodeFrame frame = topFrame; frame != null; frame = frame.caller()) {
-                if (SubstrateCompilationDirectives.singleton().isFrameInformationRequired(frame.getMethod())) {
+                if (SubstrateCompilationDirectives.singleton().isFrameInformationRequired(frame.getMethod()) || isInterpreterBytecodeHandlerStub(frame.getMethod())) {
                     /*
                      * Somewhere in the inlining hierarchy is a method for which frame information
-                     * was explicitly requested. For simplicity, we output frame information for all
-                     * methods in the inlining chain.
+                     * was explicitly requested, or a threaded handler stub whose inlined Java
+                     * handler owns the BCI needed during stack walking. For simplicity, we output
+                     * frame information for all methods in the inlining chain.
                      *
                      * We require frame information, for example, for frames that must be visible to
                      * SubstrateStackIntrospection.
@@ -941,11 +981,11 @@ public abstract class NativeImageCodeCache {
 
         void addClassLookupError(HostedType declaringClass, Throwable exception);
 
-        void addFieldLookupError(HostedType declaringClass, Throwable exception);
+        void addFieldLookupErrors(HostedType declaringClass, Throwable declaredException, Throwable publicException);
 
-        void addMethodLookupError(HostedType declaringClass, Throwable exception);
+        void addMethodLookupErrors(HostedType declaringClass, Throwable declaredException, Throwable publicException);
 
-        void addConstructorLookupError(HostedType declaringClass, Throwable exception);
+        void addConstructorLookupErrors(HostedType declaringClass, Throwable declaredException, Throwable publicException);
 
         void addRecordComponentsLookupError(HostedType declaringClass, Throwable exception);
 

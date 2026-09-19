@@ -25,25 +25,39 @@
 package com.oracle.svm.core.jdk;
 
 import java.lang.module.ModuleFinder;
+import java.lang.module.ModuleReference;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.RecomputeFieldValue;
 import com.oracle.svm.core.annotate.RecomputeFieldValue.Kind;
 import com.oracle.svm.core.annotate.TargetClass;
+import jdk.internal.loader.Resource;
+import jdk.internal.module.ModuleBootstrap;
 
-@TargetClass(className = "jdk.internal.module.ModuleBootstrap")
+@TargetClass(value = ModuleBootstrap.class)
 @SuppressWarnings("unused")
 final class Target_jdk_internal_module_ModuleBootstrap {
     // Checkstyle: stop
-    /// Preserves the build-time native-access grants selected while building the image. Runtime
-    /// `--enable-native-access` values are additive and must be merged into this hosted baseline.
+    /// Holds the module names consumed by `ModuleBootstrap#addEnableNativeAccess`.
     @Alias @RecomputeFieldValue(kind = Kind.None, isFinal = false) //
     static Set<String> USER_NATIVE_ACCESS_MODULES;
     // Checkstyle: resume
 
+    @Alias @RecomputeFieldValue(kind = Kind.None, isFinal = false) //
+    static Target_jdk_internal_module_ModulePatcher patcher;
+
     @Alias
     static native void addExtraReads(ModuleLayer bootLayer);
+
+    @Alias
+    static native Target_jdk_internal_module_ModulePatcher initModulePatcher();
+
+    @Alias
+    static native Set<String> addModules();
 
     @Alias
     static native void addExtraExportsAndOpens(ModuleLayer bootLayer);
@@ -58,21 +72,57 @@ final class Target_jdk_internal_module_ModuleBootstrap {
     static native ModuleFinder finderFor(String prop);
 }
 
+@TargetClass(value = jdk.internal.module.ModulePatcher.class)
+@SuppressWarnings("unused")
+final class Target_jdk_internal_module_ModulePatcher {
+
+    /// Aliases the JDK patch path map used for runtime patched-module resource lookup.
+    @Alias Map<String, List<Path>> map;
+
+    @Alias
+    native ModuleReference patchIfNeeded(ModuleReference moduleReference);
+}
+
+@TargetClass(className = "jdk.internal.module.ModulePatcher", innerClass = "PatchedModuleReader")
+@SuppressWarnings("unused")
+final class Target_jdk_internal_module_ModulePatcher_PatchedModuleReader {
+
+    @Alias
+    public native Resource findResource(String name) throws java.io.IOException;
+}
+
+@TargetClass(value = jdk.internal.module.SystemModuleFinders.class)
+@SuppressWarnings("unused")
+final class Target_jdk_internal_module_SystemModuleFinders {
+    /// Holds the finder returned by `ModuleFinder.ofSystem()`.
+    @Alias @RecomputeFieldValue(kind = Kind.None, isFinal = false) //
+    static ModuleFinder cachedSystemModuleFinder;
+}
+
 final class ModuleBootstrapSubstitutionsSupport {
     private ModuleBootstrapSubstitutionsSupport() {
     }
 
-    /// Merges runtime `--enable-native-access` selections into the hosted
-    /// `ModuleBootstrap.USER_NATIVE_ACCESS_MODULES` value before the original
-    /// `ModuleBootstrap.addEnableNativeAccess(ModuleLayer)` runs. The hosted value is part of the
-    /// image configuration and remains authoritative; launch-time values only add to it.
-    static void mergeRuntimeEnableNativeAccessModules() {
+    /// Applies only launch-time `--enable-native-access` selections to the runtime boot layer.
+    ///
+    /// Native-access grants selected during image building are already replicated into runtime
+    /// modules by `ModuleLayerFeature`. Replaying the hosted module-name set here would warn for
+    /// builder-only modules that are intentionally absent from the image boot layer.
+    static void addRuntimeEnableNativeAccessModules(ModuleLayer bootLayer) {
         Set<String> runtimeModules = Target_jdk_internal_module_ModuleBootstrap.decodeEnableNativeAccess();
-        if (runtimeModules.isEmpty()) {
-            return;
-        }
-        Set<String> mergedModules = new java.util.LinkedHashSet<>(Target_jdk_internal_module_ModuleBootstrap.USER_NATIVE_ACCESS_MODULES);
-        mergedModules.addAll(runtimeModules);
-        Target_jdk_internal_module_ModuleBootstrap.USER_NATIVE_ACCESS_MODULES = mergedModules;
+        /*
+         * Replace the build-time USER_NATIVE_ACCESS_MODULES value with only launch-time user
+         * grants. ModuleLayerFeature already copies build-time --enable-native-access grants into
+         * the Module objects stored in the image heap, so replaying the hosted user list here would
+         * only warn for build-time modules that are intentionally absent from the runtime boot
+         * layer.
+         */
+        Target_jdk_internal_module_ModuleBootstrap.USER_NATIVE_ACCESS_MODULES = runtimeModules;
+        /*
+         * The JDK helper also applies the fixed ModuleLoaderMap.nativeAccessModules() grants. That
+         * must still run when there are no launch-time user grants because a JDK module can be
+         * added to the boot layer at runtime.
+         */
+        Target_jdk_internal_module_ModuleBootstrap.addEnableNativeAccess(bootLayer);
     }
 }

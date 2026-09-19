@@ -2,7 +2,42 @@
 
 This changelog summarizes newly introduced optimizations and other compiler related changes.
 
-## GraalVM 25.1 (Internal Version 25.1.0)
+## GraalVM 25.5 (Internal Version 25.5.5)
+* (GR-79588): Added a deduplication optimization that can reduce generated code size by sharing
+  equivalent statements and expressions from converging control-flow branches. The optimization is
+  enabled by default and can be disabled with `-Djdk.graal.OptDeDuplication=false`.
+* (GR-79526): Extended lock elimination to coarsen locks across simple control flow and eliminate
+  nested locking of the same object.
+* (GR-79587): Added `GuardRangeGroupingPhase`, which removes redundant integer range guards by
+  retaining the tightest lower and upper bounds for guards with the same anchor. The optimization is
+  enabled by default and can be disabled with `-Djdk.graal.OptGuardRangeGrouping=false`.
+* (GR-79585): Added an optimization that replaces eligible loop-carried memory reads with value
+  phis, allowing invariant reads to move out of the loop. The optimization is enabled by default
+  and can be disabled with `-Djdk.graal.OptimizeLoopAccesses=false`.
+
+## GraalVM 25.4 (Internal Version 25.4.4.1.1)
+* (GR-79029): Add `PullThroughPhiPhase` and `DuplicationPhase` to the community compiler configuration.
+  The optimizations are enabled by default and can be disabled with `-Djdk.graal.OptPullThroughPhi=false` and
+  `-Djdk.graal.OptDuplication=false`, respectively.
+* (GR-78871): Extended read elimination to handle indexed array accesses with nonconstant indices, reads from newly
+  allocated arrays whose elements contain default values, and array clone operations. Read elimination can now also
+  run after reads are fixed in the low tier.
+* (GR-78795): Extended `OptimizeDivPhase` with magic-number optimizations for unsigned integer division
+  and remainder operations by constant values.
+
+## GraalVM 25.3 (Internal Version 25.3.4.1)
+* (GR-77137) Add new priority inlining algorithm that does extensive analysis of the call graph when making
+  inlining decisions (see `PriorityInliningPhase` for details). It is now the default inliner. To use the old
+  inliner now requires setting the `UsePriorityInlining` option to false (e.g. `-Djdk.graal.UsePriorityInlining=false`).
+  Also added `MethodDuplicationPhase`, which duplicates selected control-flow paths within a method to expose further
+  optimization opportunities.
+* (GR-28213): Added the loop vectorization optimization for certain loops doing arithmetic over arrays. The computation
+  is transformed into a SIMD (single instruction, multiple data) form that uses the target CPU's vector instructions to
+  compute multiple values in parallel. In JIT-compiled code this can improve performance of suitable loops by a factor
+  proportional to the length of the CPU's vector registers. This optimization is enabled by default and can be disabled
+  with `-Djdk.graal.VectorizeLoops=false`.
+
+## GraalVM 25.1 (Internal Version 25.1.3)
 * (GR-69280): Allow use of the `graal.` prefix for Graal compiler options without issuing a warning.
 * (GR-58163): Added support for recording and replaying JIT compilations. The `-Djdk.graal.RecordForReplay=*` option
   serializes all compilations matching the pattern to JSON files, which contain the results of JVMCI calls. The

@@ -42,6 +42,8 @@ import static com.oracle.svm.interpreter.metadata.Bytecodes.Flags.TYPE_PROFILED;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 
+import jdk.internal.vm.annotation.Stable;
+
 /**
  * Definitions of the standard Java bytecodes defined by
  * <a href= "http://java.sun.com/docs/books/jvms/second_edition/html/VMSpecTOC.doc.html"> Java
@@ -257,6 +259,10 @@ public class Bytecodes {
     public static final int QUICK_PUTSTATIC      = 204; // 0xCC
     public static final int QUICK_GETFIELD       = 205; // 0xCD
     public static final int QUICK_PUTFIELD       = 206; // 0xCE
+    public static final int QUICK_BALOAD         = 207; // 0xCF
+    public static final int QUICK_ZALOAD         = 208; // 0xD0
+    public static final int QUICK_BASTORE        = 209; // 0xD1
+    public static final int QUICK_ZASTORE        = 210; // 0xD2
 
     public static final int ILLEGAL = 255;
     public static final int END = 256;
@@ -376,13 +382,13 @@ public class Bytecodes {
      * An array that maps from a bytecode value to the length in bytes for the corresponding
      * instruction.
      */
-    private static final int[] lengthArray = new int[256];
+    @Stable private static final int[] lengthArray = new int[256];
 
     /**
      * An array that maps from a bytecode value to the number of slots pushed on the stack by the
      * corresponding instruction.
      */
-    private static final int[] stackEffectArray = new int[256];
+    @Stable private static final int[] stackEffectArray = new int[256];
 
     // Checkstyle: stop
     // @formatter:off
@@ -594,6 +600,10 @@ public class Bytecodes {
         def(QUICK_PUTSTATIC     , "quick_putstatic" , "bjj"  , -1, TRAP | FIELD_WRITE);
         def(QUICK_GETFIELD      , "quick_getfield"  , "bjj"  ,  0, TRAP | FIELD_READ);
         def(QUICK_PUTFIELD      , "quick_putfield"  , "bjj"  , -2, TRAP | FIELD_WRITE);
+        def(QUICK_BALOAD        , "quick_baload"    , "b"    , -1, TRAP);
+        def(QUICK_ZALOAD        , "quick_zaload"    , "b"    , -1, TRAP);
+        def(QUICK_BASTORE       , "quick_bastore"   , "b"    , -3, TRAP);
+        def(QUICK_ZASTORE       , "quick_zastore"   , "b"    , -3, TRAP);
     }
     // @formatter:on
     // Checkstyle: resume
@@ -719,13 +729,6 @@ public class Bytecodes {
     }
 
     /**
-     * Quickened field bytecodes keep the original operands but skip repeated access checks.
-     */
-    public static boolean isQuickenedFieldAccess(int opcode) {
-        return QUICK_GETSTATIC <= opcode && opcode <= QUICK_PUTFIELD;
-    }
-
-    /**
      * Maps a JVM field bytecode to its interpreter-private quickened variant.
      */
     public static int quickenedFieldAccess(int opcode) {
@@ -739,14 +742,23 @@ public class Bytecodes {
     }
 
     /**
-     * Maps quickened field bytecodes back to JVM bytecodes for external consumers.
+     * Identifies all interpreter-private quickened bytecodes.
      */
-    public static int unquickenedFieldAccess(int opcode) {
+    public static boolean isQuickened(int opcode) {
+        return QUICK_GETSTATIC <= opcode && opcode <= QUICK_ZASTORE;
+    }
+
+    /**
+     * Maps interpreter-private quickened bytecodes back to their JVM bytecodes.
+     */
+    public static int unquickened(int opcode) {
         return switch (opcode) {
             case QUICK_GETSTATIC -> GETSTATIC;
             case QUICK_PUTSTATIC -> PUTSTATIC;
             case QUICK_GETFIELD -> GETFIELD;
             case QUICK_PUTFIELD -> PUTFIELD;
+            case QUICK_BALOAD, QUICK_ZALOAD -> BALOAD;
+            case QUICK_BASTORE, QUICK_ZASTORE -> BASTORE;
             default -> opcode;
         };
     }

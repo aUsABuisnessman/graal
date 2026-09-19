@@ -46,6 +46,7 @@ import org.graalvm.polyglot.io.MessageTransport;
 
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.function.Predicate;
 
 /**
  * The sandbox policy presets and validates configurations of a {@link Context context} or
@@ -134,15 +135,19 @@ public enum SandboxPolicy {
      * disabled. IO can be {@link IOAccess#NONE disabled} or it can use a
      * {@link org.graalvm.polyglot.io.IOAccess.Builder#fileSystem(FileSystem) custom file
      * system}.</li>
-     * <li>If a custom filesystem is used, it must not be the
-     * {@link FileSystem#newDefaultFileSystem() default filesystem} or a filesytem wrapping the
-     * default file system.</li>
+     * <li>GraalVM trusts custom file systems supplied by the embedder. The embedder must ensure that
+     * a custom file system does not expose the host file system or other host resources prohibited by
+     * the selected sandbox policy to guest code. Sandbox validation rejects the
+     * {@link FileSystem#newDefaultFileSystem() default file system} and GraalVM-provided file system
+     * decorators known to expose it, but it cannot determine the behavior of arbitrary custom
+     * {@link FileSystem} implementations.</li>
      * <li>Only languages with a sandbox policy of at least {@code CONSTRAINED} can be used.</li>
      * <li>Only instruments with a sandbox policy of at least {@code CONSTRAINED} can be used.</li>
      * <li>Only a subset of options that are safe with the sandbox policy can be used.</li>
      * <li>If {@link HostAccess} is not specified, the {@link HostAccess#CONSTRAINED} is used.</li>
      * Otherwise, the specified {@link HostAccess} must not allow
-     * {@link HostAccess.Builder#allowPublicAccess(boolean) public access},
+     * {@link HostAccess.Builder#allowPublicAccess(boolean) unrestricted public access},
+     * {@link HostAccess.Builder#allowPublicAccess(Predicate) predicate-selected public access},
      * {@link HostAccess.Builder#allowAccessInheritance(boolean) access inheritance},
      * {@link HostAccess.Builder#allowAllClassImplementations(boolean) all class implementations},
      * {@link HostAccess.Builder#allowAllImplementations(boolean) all interface implementations} and

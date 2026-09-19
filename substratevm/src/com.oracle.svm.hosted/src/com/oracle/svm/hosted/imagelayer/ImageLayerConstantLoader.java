@@ -30,12 +30,15 @@ import static com.oracle.svm.hosted.imagelayer.SVMImageLayerSnapshotUtil.PERSIST
 import static com.oracle.svm.hosted.imagelayer.SVMImageLayerSnapshotUtil.STRING;
 
 import java.lang.reflect.Array;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
 import java.util.function.IntFunction;
 import java.util.function.Supplier;
-import java.util.stream.IntStream;
 
 import org.graalvm.nativeimage.impl.CEntryPointLiteralCodePointer;
 
@@ -75,7 +78,7 @@ import com.oracle.svm.hosted.snapshot.util.SnapshotAdapters;
 import com.oracle.svm.hosted.snapshot.util.SnapshotStructList;
 import com.oracle.svm.shared.util.LogUtils;
 import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.util.AnnotationUtil;
+import com.oracle.svm.util.GuestAnnotationAccess;
 import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.JVMCIReflectionUtil;
 import com.oracle.svm.util.OriginalClassProvider;
@@ -129,21 +132,78 @@ final class ImageLayerConstantLoader {
      * reachable transitively from other constants.
      */
     void relinkStaticFinalFieldValues(boolean isLateLoading) {
-        IntStream.range(0, snapshot.getConstants().size()).parallel().forEach(i -> {
-            var constantData = snapshot.getConstants().get(i);
-            var relinking = constantData.getObject().getRelinking();
+        /*
+         * Relinking can trigger hosted class initialization, which may execute arbitrary framework
+         * code. Do not use a ForkJoinPool here: if class initialization waits for fork-join work
+         * from a relinking worker thread, that thread can help the relinking pool (see
+         * ForkJoinTask.awaitDone and ForkJoinPool.helpJoin). This can create a deadlock, because
+         * those tasks can load new types, which can lock on the ClassInitializationSupport and on
+         * the AnalysisUniverse.types map.
+         */
+        int constantCount = snapshot.getConstants().size();
+        int parallelism = Math.max(1, ForkJoinPool.commonPool().getParallelism());
+        int taskCount = Math.max(1, Math.min(constantCount, parallelism));
+
+        prepareFieldDeclaringTypes(isLateLoading);
+
+        try (ExecutorService relinkingExecutor = Executors.newFixedThreadPool(taskCount)) {
+            AnalysisFuture<?>[] tasks = new AnalysisFuture<?>[taskCount];
+            for (int i = 0; i < taskCount; ++i) {
+                int firstConstant = i * constantCount / taskCount;
+                int lastConstant = (i + 1) * constantCount / taskCount;
+                AnalysisFuture<?> task = new AnalysisFuture<>(() -> {
+                    for (int j = firstConstant; j < lastConstant; j++) {
+                        relinkStaticFinalFieldValue(j, isLateLoading);
+                    }
+                });
+                relinkingExecutor.execute(task);
+                tasks[i] = task;
+            }
+            for (AnalysisFuture<?> task : tasks) {
+                task.guardedGet();
+            }
+        }
+    }
+
+    private void prepareFieldDeclaringTypes(boolean isLateLoading) {
+        Set<Integer> loadedDeclaringTypes = new HashSet<>();
+        for (int i = 0; i < snapshot.getConstants().size(); i++) {
+            PersistedConstantData.Loader constantData = snapshot.getConstants().get(i);
+            if (!constantData.isObject()) {
+                continue;
+            }
+            RelinkingData.Loader relinking = constantData.getObject().getRelinking();
             if (relinking.isFieldConstant() && relinking.getFieldConstant().getRequiresLateLoading() == isLateLoading) {
-                ImageHeapConstant constant = getOrCreateConstant(constantData.getId());
-                /*
-                 * If the field value cannot be read, the hosted object will not be relinked. If
-                 * there's already an ImageHeapConstant registered for the same hosted value, the
-                 * registration will fail. That could mean that we try to register too late.
-                 */
-                if (constant.getHostedObject() != null) {
-                    loader.universe.getHeapScanner().registerBaseLayerValue(constant, PERSISTED);
+                int fieldId = relinking.getFieldConstant().getOriginFieldId();
+                int declaringTypeId = loader.findField(fieldId).getDeclaringTypeId();
+                if (loadedDeclaringTypes.add(declaringTypeId)) {
+                    /*
+                     * Loading a base-layer type can initialize its hosted class. Preserve the
+                     * snapshot order used before relinking was parallelized: class initialization
+                     * cycles can otherwise observe partially initialized static fields when a
+                     * different class becomes the initialization root. Only declaring types are
+                     * loaded here; field loading and constant reconstruction remain parallel.
+                     */
+                    loader.getAnalysisTypeForBaseLayerId(declaringTypeId);
                 }
             }
-        });
+        }
+    }
+
+    private void relinkStaticFinalFieldValue(int constantIndex, boolean isLateLoading) {
+        var constantData = snapshot.getConstants().get(constantIndex);
+        var relinking = constantData.getObject().getRelinking();
+        if (relinking.isFieldConstant() && relinking.getFieldConstant().getRequiresLateLoading() == isLateLoading) {
+            ImageHeapConstant constant = getOrCreateConstant(constantData.getId());
+            /*
+             * If the field value cannot be read, the hosted object will not be relinked. If
+             * there's already an ImageHeapConstant registered for the same hosted value, the
+             * registration will fail. That could mean that we try to register too late.
+             */
+            if (constant.getHostedObject() != null) {
+                loader.universe.getHeapScanner().registerBaseLayerValue(constant, PERSISTED);
+            }
+        }
     }
 
     private PersistedConstantData.Loader findConstant(int id) {
@@ -597,7 +657,7 @@ final class ImageLayerConstantLoader {
 
     private static boolean shouldRelinkField(AnalysisField field) {
         VMError.guarantee(field.isInSharedLayer());
-        return !(field.getWrapped() instanceof BaseLayerField) && !AnnotationUtil.isAnnotationPresent(field, Delete.class);
+        return !(field.getWrapped() instanceof BaseLayerField) && !GuestAnnotationAccess.isAnnotationPresent(field, Delete.class);
     }
 
     private JavaConstant getEnumValue(String className, String name) {

@@ -26,52 +26,77 @@ package com.oracle.svm.core.graal.code;
 
 import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.impl.InternalPlatform;
 import org.graalvm.word.Pointer;
 
+import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.shared.Uninterruptible;
+import com.oracle.svm.shared.util.NumUtil;
+
+import jdk.graal.compiler.api.replacements.Fold;
 
 /* Helper class to set ABI specific data */
 public interface InterpreterAccessStubData {
     String REASON_RAW_POINTER = "raw pointer to object";
 
+    /*
+     * Maximum number of parameters that can be passed according to 4.3.3 in the JVM spec. Could be
+     * optimized, see GR-71907.
+     */
+    int MAX_ARGUMENT_HANDLES = 255;
+    int JNI_LEAVE_STUB_PREFIX_ARGUMENTS = 2;
+    int JAVA_LEAVE_STUB_DEOPT_SLOT = 1;
+    int AMD64_WINDOWS_NATIVE_SHADOW_ARGUMENTS = 4;
+
+    @Fold
+    static int getStackBufferSize() {
+        int windowsAMD64ShadowArguments = Platform.includedIn(InternalPlatform.WINDOWS_BASE.class) ? AMD64_WINDOWS_NATIVE_SHADOW_ARGUMENTS : 0;
+        int stackBufferSlots = MAX_ARGUMENT_HANDLES + JNI_LEAVE_STUB_PREFIX_ARGUMENTS + JAVA_LEAVE_STUB_DEOPT_SLOT + windowsAMD64ShadowArguments;
+        return NumUtil.roundUp(stackBufferSlots * Long.BYTES, SubstrateTarget.singleton().stackAlignment);
+    }
+
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    void setSp(Pointer data, int stackSize, Pointer stackBuffer, boolean saveStackSizeInDeoptSlot);
+    void setSp(Pointer data, Pointer stackBuffer);
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    void setStackSize(Pointer data, int stackSize, boolean saveStackSizeInDeoptSlot);
 
     @Uninterruptible(reason = REASON_RAW_POINTER, callerMustBe = true)
-    long getGpArgumentAt(int cArgType, Pointer data, int pos);
+    long getGpArgumentAt(int cArgType, Pointer data);
 
     @Uninterruptible(reason = REASON_RAW_POINTER, callerMustBe = true)
-    default void setGpArgumentAtOutgoing(int cArgType, Pointer data, int pos, long val) {
-        setGpArgumentAt(cArgType, data, pos, val, false);
+    default void setGpArgumentAtOutgoing(int cArgType, Pointer data, long val) {
+        setGpArgumentAt(cArgType, data, val, false);
     }
 
     @Uninterruptible(reason = REASON_RAW_POINTER, callerMustBe = true)
-    default void setGpArgumentAtOutgoingJNI(int cArgType, Pointer data, int pos, long val) {
-        setGpArgumentAtJNI(cArgType, data, pos, val, false);
+    default void setGpArgumentAtOutgoingNative(int cArgType, Pointer data, long val) {
+        setGpArgumentAtNative(cArgType, data, val, false);
     }
 
     @Uninterruptible(reason = REASON_RAW_POINTER, callerMustBe = true)
-    default void setGpArgumentAtJNI(int cArgType, Pointer data, int pos, long val, boolean incoming) {
-        setGpArgumentAt(cArgType, data, pos, val, incoming);
+    default void setGpArgumentAtNative(int cArgType, Pointer data, long val, boolean incoming) {
+        setGpArgumentAt(cArgType, data, val, incoming);
     }
 
     @Uninterruptible(reason = REASON_RAW_POINTER, callerMustBe = true)
-    default void setGpArgumentAtIncoming(int cArgType, Pointer data, int pos, long val) {
-        setGpArgumentAt(cArgType, data, pos, val, true);
+    default void setGpArgumentAtIncoming(int cArgType, Pointer data, long val) {
+        setGpArgumentAt(cArgType, data, val, true);
     }
 
     @Uninterruptible(reason = REASON_RAW_POINTER, callerMustBe = true)
-    void setGpArgumentAt(int cArgType, Pointer data, int pos, long val, boolean incoming);
+    void setGpArgumentAt(int cArgType, Pointer data, long val, boolean incoming);
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    long getFpArgumentAt(int cArgType, Pointer data, int pos);
+    long getFpArgumentAt(int cArgType, Pointer data);
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    void setFpArgumentAt(int cArgType, Pointer data, int pos, long val);
+    void setFpArgumentAt(int cArgType, Pointer data, long val);
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
-    default void setFpArgumentAtJNI(int cArgType, Pointer data, int pos, long val) {
-        setFpArgumentAt(cArgType, data, pos, val);
+    default void setFpArgumentAtNative(int cArgType, Pointer data, long val) {
+        setFpArgumentAt(cArgType, data, val);
     }
 
     @Uninterruptible(reason = REASON_RAW_POINTER, callerMustBe = true)
@@ -81,10 +106,25 @@ public interface InterpreterAccessStubData {
     void setGpReturn(Pointer data, long gpReturn);
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    Pointer getFFMUpcallData();
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    Pointer getFFMUpcallReturnBuffer(Pointer upcallData);
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     long getFpReturn(Pointer data);
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     void setFpReturn(Pointer data, long fpReturn);
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    long getGpResultAt(Pointer data, int index);
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    long getFpResultLaneAt(Pointer data, int registerIndex, int laneIndex);
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    void setFpResultLaneAt(Pointer data, int registerIndex, int laneIndex, long value);
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     int allocateStubDataSize();

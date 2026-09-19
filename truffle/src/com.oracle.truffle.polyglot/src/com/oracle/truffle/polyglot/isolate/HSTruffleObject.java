@@ -63,6 +63,7 @@ import java.lang.ref.WeakReference;
 final class HSTruffleObject implements TruffleObject {
 
     private static final Message MESSAGE_READ_BUFFER = Message.resolveExact(InteropLibrary.class, "readBuffer", Object.class, long.class, byte[].class, int.class, int.class);
+    private static final Message MESSAGE_IS_NULL = Message.resolveExact(InteropLibrary.class, "isNull", Object.class);
 
     final GuestContext context;
     private final long hostReferenceId;
@@ -109,33 +110,60 @@ final class HSTruffleObject implements TruffleObject {
     @ExportMessage
     @TruffleBoundary
     Object send(Message message, Object[] args) throws Exception {
-        byte[] messageReadBufferIntoOutByteArray = null;
-        int messageReadBufferIntoOutByteArrayOffset = -1;
-        if (message == MESSAGE_READ_BUFFER) {
-            messageReadBufferIntoOutByteArray = (byte[]) args[1];
-            messageReadBufferIntoOutByteArrayOffset = (Integer) args[2];
-            args[1] = null;
-            args[2] = 0;
+        /*
+         * A host object that represents null never crosses the boundary as a HOST_OBJECT
+         * reference: BinaryProtocol.writeHostTypedValue diverts every isNull() host value to the
+         * HOST_NULL tag, which materializes as getHostNull() rather than an HSTruffleObject.
+         * Therefore an HSTruffleObject is guaranteed to wrap a non-null host object and can answer
+         * isNull() locally, avoiding a round trip to the host on every guest-side null check.
+         */
+        if (MESSAGE_IS_NULL == message) {
+            return false;
         }
-        Object result;
+        int messageId = message.getId();
+        SymbolTable.Symbol symbol = null;
         try {
-            result = context.guestToHostDispatch.dispatch(hostReferenceId, message.getId(), args);
-        } catch (AbstractTruffleException t) {
-            /*
-             * Capture the Java stack within the isolate to enable proper Guest Frame merging, which
-             * depends on CallTarget.execute frames.
-             */
-            TruffleStackTrace.fillIn(t);
-            throw t;
+            if (SymbolTable.isMemberNameMessage(messageId)) {
+                SymbolTable.Symbol s = context.guestSymbols.acquireSymbol((String) args[0]);
+                if (s != null) {
+                    args[0] = symbol = s;
+                }
+            }
+            byte[] messageReadBufferIntoOutByteArray = null;
+            int messageReadBufferIntoOutByteArrayOffset = -1;
+            if (message == MESSAGE_READ_BUFFER) {
+                messageReadBufferIntoOutByteArray = (byte[]) args[1];
+                messageReadBufferIntoOutByteArrayOffset = (Integer) args[2];
+                args[1] = null;
+                args[2] = 0;
+            }
+            Object result;
+            try {
+                result = context.guestToHostDispatch.dispatch(hostReferenceId, messageId, args);
+                if (symbol != null) {
+                    symbol.finishRegistration();
+                }
+            } catch (AbstractTruffleException t) {
+                /*
+                 * Capture the Java stack within the isolate to enable proper Guest Frame merging, which
+                 * depends on CallTarget.execute frames.
+                 */
+                TruffleStackTrace.fillIn(t);
+                throw t;
+            }
+            if (result == null) {
+                return PolyglotIsolateAccessor.ENGINE.getHostNull();
+            }
+            if (message == MESSAGE_READ_BUFFER) {
+                byte[] outByteArray = (byte[]) result;
+                System.arraycopy(outByteArray, 0, messageReadBufferIntoOutByteArray, messageReadBufferIntoOutByteArrayOffset, outByteArray.length);
+                result = null;
+            }
+            return result;
+        } finally {
+            if (symbol != null) {
+                symbol.release();
+            }
         }
-        if (result == null) {
-            return PolyglotIsolateAccessor.ENGINE.getHostNull();
-        }
-        if (message == MESSAGE_READ_BUFFER) {
-            byte[] outByteArray = (byte[]) result;
-            System.arraycopy(outByteArray, 0, messageReadBufferIntoOutByteArray, messageReadBufferIntoOutByteArrayOffset, outByteArray.length);
-            result = null;
-        }
-        return result;
     }
 }

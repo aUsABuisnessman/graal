@@ -61,14 +61,10 @@ import com.oracle.svm.hosted.ImageClassLoader;
 import com.oracle.svm.hosted.ReachabilityCallbackNode;
 import com.oracle.svm.hosted.substitute.DeletedElementException;
 import com.oracle.svm.shared.option.HostedOptionKey;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.Disallowed;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.LogUtils;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.util.AnnotationUtil;
+import com.oracle.svm.util.GuestAnnotationAccess;
 import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.OriginalClassProvider;
 import com.oracle.svm.util.TypeResult;
@@ -98,7 +94,6 @@ import jdk.vm.ci.meta.annotation.Annotated;
  * graph optimizations.
  */
 @AutomaticallyRegisteredFeature
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
 public final class StrictDynamicAccessInferenceFeature implements InternalFeature {
 
     static class Options {
@@ -467,7 +462,10 @@ public final class StrictDynamicAccessInferenceFeature implements InternalFeatur
                  */
                 return null;
             }
-            return (T) analysisUniverse.replaceObject(element);
+            /* GR-71955: Migrate this feature's builder-object handling to JVMCI. */
+            JavaConstant constant = GuestAccess.get().getSnippetReflection().forObject(element);
+            JavaConstant replacedConstant = analysisUniverse.replaceConstantWithOrdinaryReplacers(constant);
+            return (T) analysisUniverse.getHostedValuesProvider().asObject(Object.class, replacedConstant);
         }
 
         private static <T> boolean isDeleted(T element, MetaAccessProvider metaAccess) {
@@ -489,7 +487,7 @@ public final class StrictDynamicAccessInferenceFeature implements InternalFeatur
              * If ReportUnsupportedElementsAtRuntime is set looking up a @Delete-ed element will
              * return a substitution method that has the @Delete annotation.
              */
-            return annotated != null && AnnotationUtil.isAnnotationPresent(annotated, Delete.class);
+            return annotated != null && GuestAnnotationAccess.isAnnotationPresent(annotated, Delete.class);
         }
 
         private void registerBulkPlugin(InvocationPlugins invocationPlugins, ParsingReason reason, String methodName, Consumer<Class<?>> registrationCallback) {

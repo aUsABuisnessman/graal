@@ -858,12 +858,12 @@ public class WasmJsApiSuite {
 
             final int noLimit = Integer.MAX_VALUE;
             limits = new ModuleLimits(noLimit, noLimit, noLimit, noLimit, noLimit, 6, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit,
-                            noLimit, noLimit, noLimit);
+                            noLimit, noLimit, noLimit, noLimit);
             context.readModule(binaryWithMixedExports, limits);
 
             try {
                 limits = new ModuleLimits(noLimit, noLimit, noLimit, noLimit, noLimit, 5, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit, noLimit,
-                                noLimit, noLimit, noLimit);
+                                noLimit, noLimit, noLimit, noLimit);
                 context.readModule(binaryWithMixedExports, limits);
                 Assert.fail("Should have failed - export count exceeds the limit");
             } catch (WasmException ex) {
@@ -1492,6 +1492,25 @@ public class WasmJsApiSuite {
             } catch (WasmJsApiException e) {
                 Assert.assertEquals("Range error expected", WasmJsApiException.Kind.RangeError, e.kind());
             }
+        });
+    }
+
+    @Test
+    public void testMemoryWithoutDeclaredMaximum() throws IOException {
+        runMemoryTest(context -> {
+            WasmMemory memory = WebAssembly.memAlloc(1, Sizes.NO_MEMORY_MAXIMUM, false);
+            Assert.assertFalse(memory.hasDeclaredMaxSize());
+            Assert.assertEquals(Sizes.NO_MEMORY_MAXIMUM, memory.declaredMaxSize());
+            Assert.assertEquals(Sizes.NO_MEMORY_MAXIMUM, WebAssembly.memMax(memory));
+            Assert.assertEquals(1, WebAssembly.memGrow(memory, 1));
+        });
+    }
+
+    @Test
+    public void testMemoryWithDeclaredMaximum() throws IOException {
+        runMemoryTest(context -> {
+            WasmMemory memory = WebAssembly.memAlloc(1, 2, false);
+            Assert.assertEquals(2, WebAssembly.memMax(memory));
         });
     }
 
@@ -2423,6 +2442,10 @@ public class WasmJsApiSuite {
             Assert.assertEquals("Value written to pre-grow buffer not seen in post-grow buffer", 42, postGrowBuffer.get(0));
             postGrowBuffer.put(1, (byte) 21);
             Assert.assertEquals("Value written to post-grow buffer not seen in pre-grow buffer", 21, preGrowBuffer.get(1));
+            preGrowBuffer.put(Sizes.MEMORY_PAGE_SIZE, (byte) 42);
+            Assert.assertEquals("Value written to pre-grow buffer not seen in post-grow buffer in grown section", 42, postGrowBuffer.get(Sizes.MEMORY_PAGE_SIZE));
+            postGrowBuffer.put(Sizes.MEMORY_PAGE_SIZE + 1, (byte) 21);
+            Assert.assertEquals("Value written to post-grow buffer not seen in pre-grow buffer in grown section", 21, preGrowBuffer.get(Sizes.MEMORY_PAGE_SIZE + 1));
         });
     }
 

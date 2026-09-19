@@ -24,33 +24,8 @@
  */
 package com.oracle.svm.hosted;
 
-import com.oracle.graal.pointsto.reports.ReportUtils;
-import com.oracle.svm.core.ClassLoaderSupport;
-import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.feature.AutomaticallyRegisteredFeatureServiceRegistration;
-import com.oracle.svm.core.feature.InternalFeature;
-import com.oracle.svm.core.util.InterruptImageBuilding;
-import com.oracle.svm.core.util.UserError;
-import com.oracle.svm.core.util.UserError.UserException;
-import com.oracle.svm.hosted.FeatureImpl.IsInConfigurationAccessImpl;
-import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
-import com.oracle.svm.shared.option.APIOption;
-import com.oracle.svm.shared.option.AccumulatingLocatableMultiOptionValue;
-import com.oracle.svm.shared.option.HostedOptionKey;
-import com.oracle.svm.shared.option.SubstrateOptionsParser;
-import com.oracle.svm.shared.util.ReflectionUtil;
-import com.oracle.svm.shared.util.ReflectionUtil.ReflectionUtilError;
-import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.shared.util.VMError.HostedError;
-import jdk.graal.compiler.debug.DebugContext;
-import jdk.graal.compiler.options.Option;
-import jdk.vm.ci.meta.MetaAccessProvider;
-import org.graalvm.collections.EconomicSet;
-import org.graalvm.nativeimage.ImageSingletons;
-import org.graalvm.nativeimage.hosted.Feature;
-import org.graalvm.nativeimage.impl.APIDeprecationSupport;
-
 import java.io.PrintWriter;
+import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -61,28 +36,58 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import com.oracle.svm.util.GuestAccess;
+import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.hosted.Feature;
+import org.graalvm.nativeimage.impl.APIDeprecationSupport;
+import com.oracle.graal.pointsto.reports.ReportUtils;
+import com.oracle.svm.core.ClassLoaderSupport;
+import com.oracle.svm.core.FutureDefaultsOptions;
+import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredFeatureServiceRegistration;
+import com.oracle.svm.core.feature.InternalFeature;
+import com.oracle.svm.core.util.InterruptImageBuilding;
+import com.oracle.svm.core.util.UserError;
+import com.oracle.svm.core.util.UserError.UserException;
+import com.oracle.svm.hosted.FeatureImpl.IsInConfigurationAccessImpl;
+import com.oracle.svm.hosted.FeatureImpl.OnRegistrationAccessImpl;
+import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
+import com.oracle.svm.guest.staging.feature.FeatureHandlerBase;
+import com.oracle.svm.shared.option.APIOption;
+import com.oracle.svm.shared.option.AccumulatingLocatableMultiOptionValue;
+import com.oracle.svm.shared.option.HostedOptionKey;
+import com.oracle.svm.shared.option.SubstrateOptionsParser;
+import com.oracle.svm.shared.util.LogUtils;
+import com.oracle.svm.shared.util.ReflectionUtil;
+import com.oracle.svm.shared.util.ReflectionUtil.ReflectionUtilError;
+import com.oracle.svm.shared.util.VMError;
+import com.oracle.svm.shared.util.VMError.HostedError;
+import jdk.graal.compiler.debug.DebugContext;
+import jdk.graal.compiler.options.Option;
+import jdk.graal.compiler.vmaccess.guest.HostProxyException;
+import jdk.vm.ci.meta.MetaAccessProvider;
+
 /**
  * Handles the registration and iterations of {@link Feature features}.
  */
-public class FeatureHandler {
+public class FeatureHandler extends FeatureHandlerBase {
+    private GuestFeatureDispatchFeature guestFeatureDispatch;
 
     public static class Options {
         @APIOption(name = "features") //
         @Option(help = "A comma-separated list of fully qualified Feature implementation classes")//
         public static final HostedOptionKey<AccumulatingLocatableMultiOptionValue.Strings> Features = new HostedOptionKey<>(AccumulatingLocatableMultiOptionValue.Strings.buildWithCommaDelimiter());
 
-        private static List<String> userEnabledFeatures() {
+        static List<String> userEnabledFeatures() {
             return Options.Features.getValue().values();
         }
 
     }
 
-    private final ArrayList<Feature> featureInstances = new ArrayList<>();
-    private final EconomicSet<Class<?>> registeredFeatures = EconomicSet.create();
-
     public void forEachFeature(Consumer<Feature> consumer) {
         for (Feature feature : featureInstances) {
             try {
+                // This deprecation attribution covers builder features only; guest iteration must attribute user features independently.
                 if (!ImageSingletons.lookup(APIDeprecationSupport.class).isUserEnabledFeaturesStarted() && Options.userEnabledFeatures().contains(feature.getClass().getName())) {
                     ImageSingletons.lookup(APIDeprecationSupport.class).setUserEnabledFeaturesStarted(true);
                 }
@@ -102,13 +107,9 @@ public class FeatureHandler {
         }
     }
 
-    public boolean containsFeature(Class<?> c) {
-        return registeredFeatures.contains(c);
-    }
-
-    @SuppressWarnings("unchecked")
     public void registerFeatures(ImageClassLoader loader, MetaAccessProvider originalMetaAccess, DebugContext debug) {
         IsInConfigurationAccessImpl access = new IsInConfigurationAccessImpl(this, loader, originalMetaAccess, debug);
+        OnRegistrationAccessImpl onRegistrationAccess = new OnRegistrationAccessImpl(this, loader, originalMetaAccess, debug);
 
         AutomaticallyRegisteredFeatureLoader automaticFeatureLoader = new AutomaticallyRegisteredFeatureLoader(loader);
         LinkedHashSet<Class<?>> automaticFeatures = automaticFeatureLoader.loadRegisteredClasses();
@@ -116,7 +117,7 @@ public class FeatureHandler {
 
         Map<Class<?>, Class<?>> specificAutomaticFeatures = new HashMap<>();
         for (Class<?> automaticFeature : automaticFeatures) {
-            List<Class<?>> mostSpecificFeatures = automaticFeatureLoader.findMostSpecificClasses(automaticFeature, automaticFeatures);
+            List<Class<?>> mostSpecificFeatures = AutomaticallyRegisteredClassSupport.findMostSpecificClasses(automaticFeature, automaticFeatures);
             if (mostSpecificFeatures.size() > 1) {
                 String candidates = mostSpecificFeatures.stream().map(Class::getName).collect(Collectors.joining(", "));
                 throw UserError.abort("Ambiguous @%s extension for %s. Expected one most-specific annotated class, but found %s.",
@@ -132,29 +133,50 @@ public class FeatureHandler {
         for (Class<?> specific : specificAutomaticFeatures.values()) {
             automaticFeatures.remove(specific);
         }
+        VMError.guarantee(automaticFeatures.remove(GuestFeatureDispatchFeature.class), "GuestFeatureDispatchFeature must be registered explicitly after all other automatically registered features.");
 
         Function<Class<?>, Class<?>> specificClassProvider = specificAutomaticFeatures::get;
+        boolean printFeatures = NativeImageOptions.PrintFeatures.getValue();
         for (Class<?> featureClass : automaticFeatures) {
-            registerFeature(featureClass, specificClassProvider, access);
+            registerFeature(featureClass, specificClassProvider, access, onRegistrationAccess, false, printFeatures);
         }
+        VMError.guarantee(!containsFeature(GuestFeatureDispatchFeature.class), "GuestFeatureDispatchFeature must not be registered transitively.");
+        registerFeature(GuestFeatureDispatchFeature.class, specificClassProvider, access, onRegistrationAccess, false, printFeatures);
 
-        List<ClassLoader> featureClassLoaders = loader.classLoaderSupport.getClassLoaders();
-        for (String featureName : Options.userEnabledFeatures()) {
-            Class<?> featureClass = null;
-            for (ClassLoader featureClassLoader : featureClassLoaders) {
-                try {
-                    featureClass = Class.forName(featureName, true, featureClassLoader);
-                    break;
-                } catch (ClassNotFoundException e) {
-                    /* Ignore */
+        if (GuestAccess.get().isFullyIsolated()) {
+            for (String featureName : Options.userEnabledFeatures()) {
+                if (guestFeatureDispatch == null) {
+                    guestFeatureDispatch = ImageSingletons.lookup(GuestFeatureDispatchFeature.class);
+                }
+                if (!guestFeatureDispatch.registerFeature(featureName, loader, printFeatures)) {
+                    throw UserError.abort("User-enabled Feature %s class not found. Ensure that the name is correct and that the class is on the class- or module-path.", featureName);
                 }
             }
-            if (featureClass == null) {
-                throw UserError.abort("User-enabled Feature %s class not found. Ensure that the name is correct and that the class is on the class- or module-path.", featureName);
+        } else {
+            for (String featureName : Options.userEnabledFeatures()) {
+                var featureClassLoaders = loader.classLoaderSupport.getClassLoaders();
+                Class<?> featureClass = null;
+                for (var featureClassLoaderConstant : featureClassLoaders) {
+                    /*
+                     * GR-72635: This converts a guest class-loader constant back to a builder-hosted
+                     * object. Terminus must load and invoke features in the guest context instead.
+                     */
+                    ClassLoader featureClassLoader = GuestAccess.get().getSnippetReflection().asObject(ClassLoader.class, featureClassLoaderConstant);
+                    try {
+                        featureClass = Class.forName(featureName, true, featureClassLoader);
+                        break;
+                    } catch (ClassNotFoundException e) {
+                        /* Ignore */
+                    }
+                }
+                if (featureClass == null) {
+                    throw UserError.abort("User-enabled Feature %s class not found. Ensure that the name is correct and that the class is on the class- or module-path.", featureName);
+                }
+                registerFeature(featureClass, specificClassProvider, access, onRegistrationAccess, true, printFeatures);
             }
-            registerFeature(featureClass, specificClassProvider, access);
         }
-        if (NativeImageOptions.PrintFeatures.getValue()) {
+        if (printFeatures) {
+            reportExplicitFeatureSingletonCompatibility();
             ReportUtils.report("feature information", SubstrateOptions.reportsPath(), "feature_info", "csv", out -> {
                 out.println("Feature, Required Features");
                 dumpAllFeatures(out);
@@ -162,64 +184,46 @@ public class FeatureHandler {
         }
     }
 
-    /**
-     * Instantiates the given feature class and (recursively) all feature classes it requires.
-     *
-     * @param access
-     */
-    @SuppressWarnings("unchecked")
-    private void registerFeature(Class<?> baseFeatureClass, Function<Class<?>, Class<?>> specificClassProvider, IsInConfigurationAccessImpl access) {
-        if (!Feature.class.isAssignableFrom(baseFeatureClass)) {
-            throw UserError.abort("Class does not implement %s: %s", Feature.class.getName(), baseFeatureClass.getName());
-        }
+    @Override
+    protected boolean isInternalFeature(Feature feature) {
+        return feature instanceof InternalFeature;
+    }
 
-        if (registeredFeatures.contains(baseFeatureClass)) {
-            return;
-        }
+    @Override
+    protected RuntimeException invalidFeatureClass(Class<?> featureClass) {
+        throw UserError.abort("Class does not implement %s: %s", Feature.class.getName(), featureClass.getName());
+    }
 
-        /*
-         * Immediately add to the registeredFeatures to avoid infinite recursion in case of cyclic
-         * dependencies.
-         */
-        registeredFeatures.add(baseFeatureClass);
-
-        Class<?> specificClass = specificClassProvider.apply(baseFeatureClass);
-        Class<?> featureClass = specificClass != null ? specificClass : baseFeatureClass;
-        Feature feature;
+    @Override
+    protected Feature instantiateFeature(Class<?> featureClass) {
         try {
-            feature = (Feature) ReflectionUtil.newInstance(featureClass);
+            return (Feature) ReflectionUtil.newInstance(featureClass);
         } catch (ReflectionUtilError ex) {
             throw UserError.abort(ex.getCause(), "Error instantiating Feature class %s. Ensure the class is not abstract and has a no-argument constructor.", featureClass.getTypeName());
         }
+    }
 
-        try {
-            if (!feature.isInConfiguration(access)) {
-                return;
-            }
-        } catch (Throwable t) {
-            throw handleFeatureError(feature, t);
+    // The reporting helper below combines builder and guest feature state.
+    private void reportExplicitFeatureSingletonCompatibility() {
+        List<String> featureNames = compatibilityPublishedFeatureSingletons.stream()
+                        .map(Class::getName)
+                        .collect(Collectors.toCollection(ArrayList::new));
+        if (guestFeatureDispatch != null) {
+            featureNames.addAll(guestFeatureDispatch.getGuestCompatibilityPublishedFeatureSingletons());
         }
-
-        /*
-         * All features are automatically added to the VMConfiguration, to allow convenient
-         * configuration checks.
-         */
-        ImageSingletons.add((Class<Feature>) baseFeatureClass, feature);
-
-        /*
-         * First add dependent features so that initializers are executed in order of dependencies.
-         */
-        List<Class<? extends Feature>> requiredFeatures;
-        try {
-            requiredFeatures = feature.getRequiredFeatures();
-        } catch (Throwable t) {
-            throw handleFeatureError(feature, t);
+        if (featureNames.isEmpty()) {
+            return;
         }
-        for (Class<? extends Feature> requiredFeatureClass : requiredFeatures) {
-            registerFeature(requiredFeatureClass, specificClassProvider, access);
-        }
-
-        featureInstances.add(feature);
+        String featureNamesString = featureNames.stream()
+                        .sorted()
+                        .collect(Collectors.joining(System.lineSeparator() + "  ", "  ", ""));
+        LogUtils.warning("The following feature classes are reached from explicitly requested %s entries and were automatically published as ImageSingletons for compatibility because they did not " +
+                        "register themselves. This compatibility behavior is deprecated and will be removed. If code needs to access one of these feature objects with ImageSingletons.lookup, " +
+                        "register it explicitly in Feature.onRegistration using ImageSingletons.add(<feature class>, this). Enable %s to stop publishing feature singletons implicitly.%s%s",
+                        SubstrateOptionsParser.commandArgument(Options.Features, "<feature class>"),
+                        SubstrateOptionsParser.commandArgument(FutureDefaultsOptions.FutureDefaults, FutureDefaultsOptions.EXPLICIT_FEATURE_SINGLETON_REGISTRATION),
+                        System.lineSeparator(),
+                        featureNamesString);
     }
 
     public List<Feature> getUserSpecificFeatures() {
@@ -242,18 +246,12 @@ public class FeatureHandler {
         });
     }
 
-    private static UserException handleFeatureError(Feature feature, Throwable throwable) {
-        /* Avoid wrapping UserError, VMError, and InterruptImageBuilding throwables. */
-        if (throwable instanceof UserException userError) {
-            throw userError;
-        }
-        if (throwable instanceof HostedError vmError) {
-            throw vmError;
-        }
-        if (throwable instanceof InterruptImageBuilding iib) {
-            throw iib;
-        }
+    @Override
+    protected UserException handleFeatureError(Feature feature, Throwable throwable) {
+        /* Avoid wrapping well-known exceptions. */
+        rethrowWellKnownException(throwable);
 
+        /* Not a well-known exception. */
         String featureClassName = feature.getClass().getName();
         String throwableClassName = throwable.getClass().getName();
         if (InternalFeature.class.isAssignableFrom(feature.getClass())) {
@@ -261,6 +259,31 @@ public class FeatureHandler {
         }
         throw UserError.abort(throwable, "Feature defined by %s unexpectedly failed with a(n) %s. Please report this problem to the authors of %s.",
                         featureClassName, throwableClassName, featureClassName);
+    }
+
+    private static void rethrowWellKnownException(Throwable t) {
+        Throwable throwable = tryUnwrapWellKnownException(t);
+        if (throwable instanceof UserException userError) {
+            throw userError;
+        } else if (throwable instanceof HostedError vmError) {
+            throw vmError;
+        } else if (throwable instanceof InterruptImageBuilding iib) {
+            throw iib;
+        } else {
+            assert throwable == t : "unwrapping must only happen for exceptions that are rethrown";
+        }
+    }
+
+    private static Throwable tryUnwrapWellKnownException(Throwable throwable) {
+        Throwable cause = null;
+        if (throwable instanceof InvocationTargetException || throwable instanceof HostProxyException) {
+            cause = throwable.getCause();
+        }
+        return isWellKnownException(cause) ? cause : throwable;
+    }
+
+    private static boolean isWellKnownException(Throwable cause) {
+        return cause instanceof UserException || cause instanceof HostedError || cause instanceof InterruptImageBuilding;
     }
 
     private static final class AutomaticallyRegisteredFeatureLoader extends AutomaticallyRegisteredClassSupport<AutomaticallyRegisteredFeatureServiceRegistration, AutomaticallyRegisteredFeature> {

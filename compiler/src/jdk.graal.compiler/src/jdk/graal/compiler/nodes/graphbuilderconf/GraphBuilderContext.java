@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -513,21 +513,6 @@ public interface GraphBuilderContext extends GraphBuilderTool {
     }
 
     /**
-     * Interface whose instances hold inlining information about the current context, in a wider
-     * sense. The wider sense in this case concerns graph building approaches that don't necessarily
-     * keep a chain of {@link GraphBuilderContext} instances normally available through
-     * {@linkplain #getParent()}. Examples of such approaches are partial evaluation and incremental
-     * inlining.
-     */
-    interface ExternalInliningContext {
-        int getInlinedDepth();
-    }
-
-    default ExternalInliningContext getExternalInliningContext() {
-        return null;
-    }
-
-    /**
      * Adds masking to a given subword value according to a given {@link JavaKind}, such that the
      * masked value falls in the range of the given kind. In the cases where the given kind is not a
      * subword kind, the input value is returned immediately.
@@ -616,8 +601,9 @@ public interface GraphBuilderContext extends GraphBuilderTool {
     }
 
     /**
-     * Determine if the given basic block is inside a {@code try} block of an exception handler
-     * catching {@link OutOfMemoryError} exceptions.
+     * Returns whether allocations appended at the current bytecode position must use explicit OOME
+     * exception edges because the current exception-dispatch chain can observe an
+     * {@link OutOfMemoryError}.
      */
     default boolean currentBlockCatchesOOME() {
         return false;

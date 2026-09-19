@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2023, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -51,6 +51,7 @@ import com.oracle.graal.pointsto.heap.ImageHeapConstant;
 import com.oracle.graal.pointsto.meta.AnalysisField;
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.AnalysisType;
+import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.util.HostedStringDeduplication;
 import com.oracle.svm.core.util.UserError;
@@ -71,6 +72,7 @@ import com.oracle.svm.interpreter.metadata.InterpreterUniverseImpl;
 import com.oracle.svm.interpreter.metadata.InterpreterUnresolvedSignature;
 import com.oracle.svm.interpreter.metadata.MetadataUtil;
 import com.oracle.svm.interpreter.metadata.ReferenceConstant;
+import com.oracle.svm.interpreter.metadata.RuntimeLoadedClassHierarchy;
 import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.util.OriginalClassProvider;
 
@@ -145,7 +147,8 @@ public final class BuildTimeInterpreterUniverse {
         String name = universe.dedup(resolvedJavaType.getName());
         Class<?> clazz = OriginalClassProvider.getJavaClass(resolvedJavaType);
         ResolvedJavaType originalType = MetadataUtil.requireNonNull(resolvedJavaType);
-        int modifiers = resolvedJavaType.getModifiers();
+        // Substituted classes can use a package-private target holder even when the original class is public.
+        int modifiers = OriginalClassProvider.getOriginalType(resolvedJavaType).getModifiers();
         InterpreterResolvedJavaType componentType;
         if (originalType.isArray()) {
             componentType = universe.getOrCreateType(originalType.getComponentType());
@@ -218,9 +221,9 @@ public final class BuildTimeInterpreterUniverse {
             }
         }
 
-        LineNumberTable lineNumberTable = originalMethod.getLineNumberTable();
+        LineNumberTable lineNumberTable = retainMethodCode ? originalMethod.getLineNumberTable() : null;
         return InterpreterResolvedJavaMethod.createAtBuildTime(
-                        originalMethod,
+                        analysisMethod,
                         name,
                         maxLocals,
                         maxStackSize,
@@ -507,6 +510,9 @@ public final class BuildTimeInterpreterUniverse {
             return previous;
         }
 
+        if (SubstrateOptions.useRistretto() && result instanceof InterpreterResolvedObjectType objectType) {
+            RuntimeLoadedClassHierarchy.registerImageType(objectType);
+        }
         InterpreterUtil.log("[universe] Adding type '%s'", resolvedJavaType);
         return result;
     }
@@ -763,7 +769,7 @@ public final class BuildTimeInterpreterUniverse {
     }
 
     static boolean isReachable(InterpreterResolvedJavaMethod method) {
-        AnalysisMethod originalMethod = (AnalysisMethod) method.getOriginalMethod();
+        AnalysisMethod originalMethod = method.getOriginalMethod();
         return originalMethod.isReachable() && originalMethod.getDeclaringClass().isReachable();
     }
 
@@ -802,7 +808,7 @@ public final class BuildTimeInterpreterUniverse {
             }
 
             if (!isReachable(interpreterMethod)) {
-                AnalysisMethod analysisMethod = (AnalysisMethod) interpreterMethod.getOriginalMethod();
+                AnalysisMethod analysisMethod = interpreterMethod.getOriginalMethod();
                 boolean isRoot = analysisMethod.isDirectRootMethod() || analysisMethod.isVirtualRootMethod() || analysisMethod.isInvoked();
                 int implementations = analysisMethod.collectMethodImplementations(true).size();
                 if (!isRoot && (next.getValue().isStatic() || implementations <= 1)) {

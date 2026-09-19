@@ -52,6 +52,7 @@ import java.io.PrintWriter;
 import java.io.StringReader;
 import java.lang.reflect.Field;
 import java.math.BigInteger;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -63,11 +64,14 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.Phaser;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.graalvm.nativeimage.ImageInfo;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Engine;
 import org.graalvm.polyglot.PolyglotException;
@@ -84,6 +88,7 @@ import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 
 import com.oracle.truffle.api.instrumentation.test.InstrumentationTestLanguage;
+import com.oracle.truffle.api.test.SubprocessTestUtils;
 import com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest;
 import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
@@ -1165,6 +1170,86 @@ public class ResourceLimitsTest extends AbstractPolyglotTest {
     }
 
     @Test
+    public void testFreshPlatformThreadCPUTimeLimit() throws IOException, InterruptedException {
+        Runnable test = () -> {
+            try {
+                testFreshPlatformThreadCPUTimeLimitInProcess();
+            } catch (InterruptedException e) {
+                throw new AssertionError(e);
+            }
+        };
+        if (ImageInfo.inImageCode()) {
+            test.run();
+        } else {
+            SubprocessTestUtils.newBuilder(getClass(), test).timeout(Duration.ofSeconds(30)).run();
+        }
+    }
+
+    private static void testFreshPlatformThreadCPUTimeLimitInProcess() throws InterruptedException {
+        try (Engine engine = newEngineBuilder().option("sandbox.MaxCPUTime", "1ms").option("sandbox.MaxCPUTimeCheckInterval", "1ms").build()) {
+            assertCPUTimeLimitExceeded(engine, "platform thread 1");
+            assertCPUTimeLimitExceeded(engine, "platform thread 2");
+        }
+    }
+
+    @Test
+    public void testResourceTrackingListenerAttachedWhileUnlimitedContextEntered() {
+        try (Engine engine = Engine.create(); Context unlimitedContext = Context.newBuilder().engine(engine).build()) {
+            unlimitedContext.enter();
+            try {
+                maxCPUTime(Context.newBuilder().engine(engine), "1h", null).build().close();
+            } finally {
+                unlimitedContext.leave();
+            }
+
+            unlimitedContext.enter();
+            unlimitedContext.leave();
+            assertEquals(Thread.NORM_PRIORITY, Thread.currentThread().getPriority());
+        }
+    }
+
+    private static void assertCPUTimeLimitExceeded(Engine engine, String label) throws InterruptedException {
+        PolyglotException failure = runWithCPUTimeLimit(engine, label);
+        assertTrue(failure.toString(), failure.isCancelled());
+        assertTrue(failure.toString(), failure.isResourceExhausted());
+        assertTrue(failure.getMessage(), failure.getMessage().startsWith("Maximum CPU time limit of"));
+    }
+
+    private static PolyglotException runWithCPUTimeLimit(Engine engine, String label) throws InterruptedException {
+        AtomicReference<Throwable> failureRef = new AtomicReference<>();
+        Semaphore finished = new Semaphore(0);
+        try (Context context = Context.newBuilder(InstrumentationTestLanguage.ID).engine(engine).build()) {
+            Source source = Source.create(InstrumentationTestLanguage.ID, "LOOP(infinity, STATEMENT)");
+            Thread thread = Thread.ofPlatform().start(() -> {
+                try {
+                    context.eval(source);
+                } catch (Throwable t) {
+                    failureRef.set(t);
+                } finally {
+                    finished.release();
+                }
+            });
+
+            boolean stopped = finished.tryAcquire(8, TimeUnit.SECONDS);
+            if (!stopped) {
+                context.close(true);
+            }
+            thread.join();
+            assertTrue(label + " did not reach the CPU time limit within 8 seconds.", stopped);
+        } catch (PolyglotException e) {
+            if (!e.isCancelled()) {
+                throw e;
+            }
+        }
+
+        Throwable failure = failureRef.get();
+        if (!(failure instanceof PolyglotException polyglotException)) {
+            throw new AssertionError(label + " did not fail with a PolyglotException.", failure);
+        }
+        return polyglotException;
+    }
+
+    @Test
     public void testBoundContextTimeLimit() {
         testBoundContextTimeLimit(false);
     }
@@ -1453,17 +1538,7 @@ public class ResourceLimitsTest extends AbstractPolyglotTest {
 
     static void assertTimeUnitOption(String optionName, boolean isMaxCPUTime) {
         // valid values
-        try {
-            newContextBuilder().option(optionName, "0ms").build().close();
-        } catch (PolyglotException pe) {
-            if (!isMaxCPUTime || TruffleTestAssumptions.isWeakEncapsulation() || !pe.isResourceExhausted() || !pe.getMessage().startsWith("Maximum CPU time limit of 0ms exceeded.")) {
-                /*
-                 * Isolated context enters the preinitialized context to replay events, and so it
-                 * consumes some CPU time which may lead to exceeding the very low CPU time limit.
-                 */
-                throw pe;
-            }
-        }
+        newContextBuilder().option(optionName, "0ms").build().close();
         try {
             newContextBuilder().option(optionName, "1ms").build().close();
         } catch (PolyglotException pe) {
@@ -1529,8 +1604,16 @@ public class ResourceLimitsTest extends AbstractPolyglotTest {
         assertFails(() -> newContextBuilder().option(optionName, "42.1ms").build(), IllegalArgumentException.class);
         assertFails(() -> newEngineBuilder().option(optionName, "42.1ms").build(), IllegalArgumentException.class);
         // long overflow
-        assertFails(() -> newContextBuilder().option(optionName, BigInteger.valueOf(Long.MAX_VALUE).add(BigInteger.valueOf(1)) + "ms").build(), IllegalArgumentException.class);
-        assertFails(() -> newEngineBuilder().option(optionName, BigInteger.valueOf(Long.MAX_VALUE).add(BigInteger.valueOf(1)) + "ms").build(), IllegalArgumentException.class);
+        String tooLargeDuration = "9223372036854776s";
+        String expectedMessage = "Invalid duration '" + tooLargeDuration +
+                        "' specified. The duration exceeds Long.MAX_VALUE milliseconds, which is already roughly 292 million years.";
+        assertFails(() -> newContextBuilder().option(optionName, tooLargeDuration).build(), IllegalArgumentException.class, expectedMessage);
+        assertFails(() -> newEngineBuilder().option(optionName, tooLargeDuration).build(), IllegalArgumentException.class, expectedMessage);
+        String tooLargeMillis = BigInteger.valueOf(Long.MAX_VALUE).add(BigInteger.ONE) + "ms";
+        expectedMessage = "Invalid duration '" + tooLargeMillis +
+                        "' specified. The duration exceeds Long.MAX_VALUE milliseconds, which is already roughly 292 million years.";
+        assertFails(() -> newContextBuilder().option(optionName, tooLargeMillis).build(), IllegalArgumentException.class, expectedMessage);
+        assertFails(() -> newEngineBuilder().option(optionName, tooLargeMillis).build(), IllegalArgumentException.class, expectedMessage);
     }
 
     @Test

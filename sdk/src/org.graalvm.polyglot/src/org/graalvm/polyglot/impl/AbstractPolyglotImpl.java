@@ -295,6 +295,8 @@ public abstract class AbstractPolyglotImpl {
 
         public abstract boolean allowsAccess(Object hostAccess, AnnotatedElement element);
 
+        public abstract boolean allowsPublicAccess(Object hostAccess, AnnotatedElement element);
+
         public abstract boolean allowsImplementation(Object hostAccess, Class<?> type);
 
         public abstract boolean isMethodScopingEnabled(Object hostAccess);
@@ -314,6 +316,8 @@ public abstract class AbstractPolyglotImpl {
         public abstract boolean isMapAccessible(Object hostAccess);
 
         public abstract boolean isBigIntegerAccessibleAsNumber(Object hostAccess);
+
+        public abstract boolean hasPublicAccess(Object hostAccess);
 
         public abstract boolean allowsPublicAccess(Object hostAccess);
 
@@ -675,6 +679,10 @@ public abstract class AbstractPolyglotImpl {
 
         public abstract void onContextCollected(Object receiver);
 
+        public String toString(Object receiver, int identityHash, String isolate) {
+            return receiver.toString();
+        }
+
     }
 
     public abstract static class AbstractEngineDispatch extends AbstractDispatchClass {
@@ -738,6 +746,10 @@ public abstract class AbstractPolyglotImpl {
         public abstract boolean storeCache(Object engineReceiver, Path targetFile, long cancelledWord);
 
         public abstract ByteBuffer persistCache(Object engineReceiver, Engine.CancellationCallback callback);
+
+        public String toString(Object receiver, int identityHash, String isolate) {
+            return receiver.toString();
+        }
 
     }
 
@@ -1027,7 +1039,7 @@ public abstract class AbstractPolyglotImpl {
             return switch (element.getClassName()) {
                 case "sun.reflect.NativeMethodAccessorImpl", "sun.reflect.DelegatingMethodAccessorImpl",
                                 "jdk.internal.reflect.NativeMethodAccessorImpl", "jdk.internal.reflect.DelegatingMethodAccessorImpl",
-                                "java.lang.reflect.Method" ->
+                                "java.lang.reflect.Method", "com.oracle.svm.core.reflect.SubstrateMethodAccessor" ->
                     element.getMethodName().startsWith("invoke");
                 default -> false;
             };

@@ -63,8 +63,8 @@ import static org.graalvm.wasm.nodes.WasmFrame.pushLong;
 import static org.graalvm.wasm.nodes.WasmFrame.pushReference;
 import static org.graalvm.wasm.nodes.WasmFrame.pushVector128;
 
-import com.oracle.truffle.api.impl.FrameWithoutBoxing;
-import com.oracle.truffle.api.nodes.ControlFlowException;
+import java.io.Serial;
+
 import org.graalvm.wasm.BinaryStreamParser;
 import org.graalvm.wasm.GlobalRegistry;
 import org.graalvm.wasm.WasmArguments;
@@ -73,7 +73,6 @@ import org.graalvm.wasm.WasmConstant;
 import org.graalvm.wasm.WasmContext;
 import org.graalvm.wasm.WasmFunction;
 import org.graalvm.wasm.WasmFunctionInstance;
-import org.graalvm.wasm.WasmTypedHeapObject;
 import org.graalvm.wasm.WasmInstance;
 import org.graalvm.wasm.WasmLanguage;
 import org.graalvm.wasm.WasmMath;
@@ -81,8 +80,7 @@ import org.graalvm.wasm.WasmModule;
 import org.graalvm.wasm.WasmTable;
 import org.graalvm.wasm.WasmTag;
 import org.graalvm.wasm.WasmType;
-import org.graalvm.wasm.vector.Vector128;
-import org.graalvm.wasm.vector.Vector128Ops;
+import org.graalvm.wasm.WasmTypedHeapObject;
 import org.graalvm.wasm.array.WasmArray;
 import org.graalvm.wasm.array.WasmFloat32Array;
 import org.graalvm.wasm.array.WasmFloat64Array;
@@ -101,34 +99,37 @@ import org.graalvm.wasm.exception.WasmException;
 import org.graalvm.wasm.exception.WasmRuntimeException;
 import org.graalvm.wasm.memory.WasmMemory;
 import org.graalvm.wasm.memory.WasmMemoryLibrary;
+import org.graalvm.wasm.parser.validation.ExceptionHandler;
 import org.graalvm.wasm.struct.WasmStruct;
 import org.graalvm.wasm.struct.WasmStructAccess;
 import org.graalvm.wasm.types.DefinedType;
+import org.graalvm.wasm.vector.Vector128;
+import org.graalvm.wasm.vector.Vector128Ops;
 
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
-import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.CompilerDirectives.EarlyInline;
 import com.oracle.truffle.api.CompilerDirectives.EarlyEscapeAnalysis;
+import com.oracle.truffle.api.CompilerDirectives.EarlyInline;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.ExactMath;
 import com.oracle.truffle.api.HostCompilerDirectives;
+import com.oracle.truffle.api.HostCompilerDirectives.BytecodeInterpreterFetchOpcode;
+import com.oracle.truffle.api.HostCompilerDirectives.BytecodeInterpreterHandler;
+import com.oracle.truffle.api.HostCompilerDirectives.BytecodeInterpreterHandlerConfig;
+import com.oracle.truffle.api.HostCompilerDirectives.BytecodeInterpreterHandlerConfig.Argument;
 import com.oracle.truffle.api.HostCompilerDirectives.BytecodeInterpreterSwitch;
 import com.oracle.truffle.api.TruffleSafepoint;
 import com.oracle.truffle.api.frame.Frame;
 import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.impl.FrameWithoutBoxing;
 import com.oracle.truffle.api.nodes.BytecodeOSRNode;
+import com.oracle.truffle.api.nodes.ControlFlowException;
 import com.oracle.truffle.api.nodes.ExplodeLoop;
 import com.oracle.truffle.api.nodes.LoopNode;
 import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.staticobject.StaticProperty;
-import com.oracle.truffle.api.HostCompilerDirectives.BytecodeInterpreterHandler;
-import com.oracle.truffle.api.HostCompilerDirectives.BytecodeInterpreterFetchOpcode;
-import com.oracle.truffle.api.HostCompilerDirectives.BytecodeInterpreterHandlerConfig;
-import com.oracle.truffle.api.HostCompilerDirectives.BytecodeInterpreterHandlerConfig.Argument;
-
-import java.io.Serial;
 
 /**
  * This node represents the function body of a WebAssembly function. It executes the instruction
@@ -143,11 +144,6 @@ import java.io.Serial;
 public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNode {
 
     private static final int REPORT_LOOP_STRIDE = 1 << 8;
-    private static final int EXCEPTION_HANDLER_TO_OFFSET = 4;
-    private static final int EXCEPTION_HANDLER_TYPE_OFFSET = 8;
-    private static final int EXCEPTION_HANDLER_TAG_OFFSET = 9;
-    private static final int EXCEPTION_HANDLER_TARGET_OFFSET = 13;
-    private static final int EXCEPTION_HANDLER_SIZE = 17;
 
     static {
         assert Integer.bitCount(REPORT_LOOP_STRIDE) == 1 : "must be a power of 2";
@@ -294,8 +290,8 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
         int count;
     }
 
-    public void execute(VirtualFrame frame, WasmInstance instance) {
-        executeBodyFromOffset(instance, frame, bytecodeStartOffset, codeEntry.stackBase(), -1, 0);
+    public Object execute(VirtualFrame frame, WasmInstance instance) {
+        return executeBodyFromOffset(instance, frame, bytecodeStartOffset, codeEntry.stackBase(), -1, 0);
     }
 
     private static final class VirtualState {
@@ -360,7 +356,6 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
         FrameWithoutBoxing frame = (FrameWithoutBoxing) virtualFrame;
         final int localCount = codeEntry.localCount();
         final int maxLegacyCatchDepth = codeEntry.maxLegacyCatchDepth();
-        final int stackBase = codeEntry.stackBase();
         final byte[] bytecode = this.bytecode;
 
         // The back edge count is stored in an object, since else the MERGE_EXPLODE policy would
@@ -414,22 +409,19 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                     }
                     case Bytecode.RETURN: {
                         offset++;
-                        if (offset >= bytecodeEndOffset) {
-                            return WasmConstant.RETURN_VALUE;
-                        }
-                        // A return statement causes the termination of the current function, i.e.
-                        // causes the execution to resume after the instruction that invoked
-                        // the current frame.
-                        if (CompilerDirectives.hasNextTier()) {
-                            int backEdgeCount = CompilerDirectives.inCompiledCode() ? backEdgeCounter.count : state.interpreterBackEdgeCounter;
-                            if (backEdgeCount > 0) {
-                                LoopNode.reportLoopCount(this, backEdgeCount);
+                        if (offset < bytecodeEndOffset) {
+                            /*
+                             * We might be at an early return inside a loop.
+                             * Therefore, we report the remaining back-edge count.
+                             */
+                            if (CompilerDirectives.hasNextTier()) {
+                                int backEdgeCount = CompilerDirectives.inCompiledCode() ? backEdgeCounter.count : state.interpreterBackEdgeCounter;
+                                if (backEdgeCount > 0) {
+                                    LoopNode.reportLoopCount(this, backEdgeCount);
+                                }
                             }
                         }
-                        final int resultCount = codeEntry.resultCount();
-                        unwindStack(frame, virtualState.stackPointer, stackBase, resultCount);
-                        dropStack(frame, virtualState.stackPointer, stackBase + resultCount);
-                        return WasmConstant.RETURN_VALUE;
+                        return state.thiz.extractResultValue(frame, virtualState.stackPointer);
                     }
                     case Bytecode.LABEL_U8: {
                         offset = labelU8Handler(offset, state, virtualState, frame);
@@ -491,6 +483,18 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                         offset = callIndirectI32Handler(offset, state, virtualState, frame);
                         break;
                     }
+                    case Bytecode.RETURN_CALL_U8: {
+                        return returnCallU8(offset, state, virtualState, frame);
+                    }
+                    case Bytecode.RETURN_CALL_I32: {
+                        return returnCallI32(offset, state, virtualState, frame);
+                    }
+                    case Bytecode.RETURN_CALL_INDIRECT_U8: {
+                        return returnCallIndirectU8(offset, state, virtualState, frame);
+                    }
+                    case Bytecode.RETURN_CALL_INDIRECT_I32: {
+                        return returnCallIndirectI32(offset, state, virtualState, frame);
+                    }
                     case Bytecode.CALL_REF_U8: {
                         offset = callRefU8Handler(offset, state, virtualState, frame);
                         break;
@@ -498,6 +502,12 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                     case Bytecode.CALL_REF_I32: {
                         offset = callRefI32Handler(offset, state, virtualState, frame);
                         break;
+                    }
+                    case Bytecode.RETURN_CALL_REF_U8: {
+                        return returnCallRefU8(offset, state, virtualState, frame);
+                    }
+                    case Bytecode.RETURN_CALL_REF_I32: {
+                        return returnCallRefI32(offset, state, virtualState, frame);
                     }
                     case Bytecode.DROP: {
                         offset = dropHandler(offset, state, virtualState, frame);
@@ -519,48 +529,24 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                         offset = localGetU8Handler(offset, state, virtualState, frame);
                         break;
                     }
-                    case Bytecode.LOCAL_GET_I32: {
-                        offset = localGetI32Handler(offset, state, virtualState, frame);
-                        break;
-                    }
                     case Bytecode.LOCAL_GET_OBJ_U8: {
                         offset = localGetObjU8Handler(offset, state, virtualState, frame);
-                        break;
-                    }
-                    case Bytecode.LOCAL_GET_OBJ_I32: {
-                        offset = localGetObjI32Handler(offset, state, virtualState, frame);
                         break;
                     }
                     case Bytecode.LOCAL_SET_U8: {
                         offset = localSetU8Handler(offset, state, virtualState, frame);
                         break;
                     }
-                    case Bytecode.LOCAL_SET_I32: {
-                        offset = localSetI32Handler(offset, state, virtualState, frame);
-                        break;
-                    }
                     case Bytecode.LOCAL_SET_OBJ_U8: {
                         offset = localSetObjU8Handler(offset, state, virtualState, frame);
-                        break;
-                    }
-                    case Bytecode.LOCAL_SET_OBJ_I32: {
-                        offset = localSetObjI32Handler(offset, state, virtualState, frame);
                         break;
                     }
                     case Bytecode.LOCAL_TEE_U8: {
                         offset = localTeeU8Handler(offset, state, virtualState, frame);
                         break;
                     }
-                    case Bytecode.LOCAL_TEE_I32: {
-                        offset = localTeeI32Handler(offset, state, virtualState, frame);
-                        break;
-                    }
                     case Bytecode.LOCAL_TEE_OBJ_U8: {
                         offset = localTeeObjU8Handler(offset, state, virtualState, frame);
-                        break;
-                    }
-                    case Bytecode.LOCAL_TEE_OBJ_I32: {
-                        offset = localTeeObjI32Handler(offset, state, virtualState, frame);
                         break;
                     }
                     case Bytecode.GLOBAL_GET_U8: {
@@ -1469,7 +1455,7 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                  */
                 while (true) {
                     final int handlerOffset = exceptionTableOffset;
-                    final int from = rawPeekI32(bytecode, exceptionTableOffset);
+                    final int from = rawPeekI32(bytecode, handlerOffset + ExceptionHandler.FROM_OFFSET);
                     if (from == -1) {
                         // we reached the end of the table
                         break;
@@ -1496,11 +1482,10 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
 
                     final int target = exceptionHandlerTarget(handlerOffset);
                     if (catchType == ExceptionHandlerType.LEGACY_DELEGATE) {
-                        // Legacy try tables are serialized inner-to-outer, so delegate continues by
-                        // scanning the remaining handlers with the delegated lookup offset. No
-                        // earlier entry can become visible again, because delegation only moves the
-                        // search to an enclosing try.
-                        handlerLookupOffset = target;
+                        // Legacy delegate targets a continuation in the exception table, not a
+                        // bytecode offset. This skips intervening handlers that are not visible
+                        // from the delegated label, even if they protect the same bytecode range.
+                        exceptionTableOffset = target;
                         continue;
                     }
 
@@ -1543,9 +1528,7 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
     }
 
     @EarlyInline
-    @SuppressWarnings("unused")
-    @BytecodeInterpreterHandler(value = {Bytecode.LOOP}, safepoint = true)
-    private static int loopHandler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
+    private static void updateBackEdgeCounterAndTryOSR(int resumeOffset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
         if (CompilerDirectives.hasNextTier()) {
             int count = CompilerDirectives.inCompiledCode() ? ++state.backEdgeCounter.count : ++state.interpreterBackEdgeCounter;
             if (CompilerDirectives.injectBranchProbability(0.001, count >= REPORT_LOOP_STRIDE)) {
@@ -1553,7 +1536,7 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                 LoopNode.reportLoopCount(state.thiz, REPORT_LOOP_STRIDE);
                 if (CompilerDirectives.inInterpreter() && BytecodeOSRNode.pollOSRBackEdge(state.thiz, REPORT_LOOP_STRIDE)) {
                     OSRInterpreterState osrInterpreterState = new OSRInterpreterState(state.lineIndex, state.activeLegacyCatchCount);
-                    Object result = BytecodeOSRNode.tryOSR(state.thiz, offset + 1 | ((long) virtualState.stackPointer << 32), osrInterpreterState, null, frame);
+                    Object result = BytecodeOSRNode.tryOSR(state.thiz, resumeOffset | ((long) virtualState.stackPointer << 32), osrInterpreterState, null, frame);
                     if (result != null) {
                         throw new WasmOSRException(result);
                     }
@@ -1565,6 +1548,13 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                 }
             }
         }
+    }
+
+    @EarlyInline
+    @SuppressWarnings("unused")
+    @BytecodeInterpreterHandler(value = {Bytecode.LOOP}, safepoint = true)
+    private static int loopHandler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
+        updateBackEdgeCounterAndTryOSR(offset + 1, state, virtualState, frame);
         return offset + 1;
     }
 
@@ -1737,6 +1727,34 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
         return offset + 9;
     }
 
+    private WasmFunctionInstance loadIndirectCallFunctionInstance(VirtualFrame frame, int stackPointer, WasmInstance instance, int tableIndex, int expectedFunctionTypeIndex) {
+        final WasmTable table = instance.table(tableIndex);
+        final Object[] elements = table.elements();
+        final long tableElementIndex = popTableIndex(frame, stackPointer, table);
+        if (checkOutOfBounds(tableElementIndex, elements.length)) {
+            enterErrorBranch(codeEntry);
+            throw WasmException.format(Failure.UNDEFINED_ELEMENT, this, "Element index '%d' out of table bounds.", tableElementIndex);
+        }
+        final int elementIndex = (int) tableElementIndex;
+        // Currently, table elements may only be functions.
+        // We can add a check here when this changes in the future.
+        final Object functionCandidate = elements[elementIndex];
+        if (!(functionCandidate instanceof WasmFunctionInstance functionInstance)) {
+            throw callIndirectNotAFunctionError(functionCandidate, elementIndex);
+        }
+        final WasmFunction function = functionInstance.function();
+        final WasmContext functionInstanceContext = functionInstance.context();
+        // Target function instance must be from the same context.
+        assert functionInstanceContext == WasmContext.get(this);
+        // Validate that the target function type matches the expected type of
+        // the indirect call.
+        if (!runTimeConcreteTypeCheck(expectedFunctionTypeIndex, functionInstance)) {
+            enterErrorBranch(codeEntry);
+            failFunctionTypeCheck(function, expectedFunctionTypeIndex);
+        }
+        return functionInstance;
+    }
+
     @EarlyInline
     @SuppressWarnings("unused")
     @BytecodeInterpreterHandler(value = {Bytecode.CALL_INDIRECT_U8}, safepoint = false)
@@ -1744,30 +1762,8 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
         final int callNodeIndex = rawPeekU8(state.bytecode, offset + 1);
         final int expectedFunctionTypeIndex = rawPeekU8(state.bytecode, offset + 2);
         final int tableIndex = rawPeekU8(state.bytecode, offset + 3);
-        final WasmTable table = state.instance.table(tableIndex);
-        final Object[] elements = table.elements();
-        final int elementIndex = popInt(frame, --virtualState.stackPointer);
-        if (elementIndex < 0 || elementIndex >= elements.length) {
-            enterErrorBranch(state.thiz.codeEntry);
-            throw WasmException.format(Failure.UNDEFINED_ELEMENT, state.thiz, "Element index '%d' out of table bounds.", elementIndex);
-        }
-        // Currently, table elements may only be functions.
-        // We can add a check here when this changes in the future.
-        final Object functionCandidate = elements[elementIndex];
-        if (!(functionCandidate instanceof WasmFunctionInstance functionInstance)) {
-            throw state.thiz.callIndirectNotAFunctionError(functionCandidate, elementIndex);
-        }
-        final WasmFunction function = functionInstance.function();
+        final WasmFunctionInstance functionInstance = state.thiz.loadIndirectCallFunctionInstance(frame, --virtualState.stackPointer, state.instance, tableIndex, expectedFunctionTypeIndex);
         final CallTarget target = functionInstance.target();
-        final WasmContext functionInstanceContext = functionInstance.context();
-        // Target function instance must be from the same context.
-        assert functionInstanceContext == WasmContext.get(state.thiz);
-        // Validate that the target function type matches the expected type of
-        // the indirect call.
-        if (!state.thiz.runTimeConcreteTypeCheck(expectedFunctionTypeIndex, functionInstance)) {
-            enterErrorBranch(state.thiz.codeEntry);
-            state.thiz.failFunctionTypeCheck(function, expectedFunctionTypeIndex);
-        }
         // Invoke the resolved function.
         int paramCount = state.module.symbolTable().functionTypeParamCount(expectedFunctionTypeIndex);
         Object[] args = state.thiz.createArgumentsForCall(frame, expectedFunctionTypeIndex, paramCount, virtualState.stackPointer);
@@ -1786,30 +1782,8 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
         final int callNodeIndex = rawPeekI32(state.bytecode, offset + 1);
         final int expectedFunctionTypeIndex = rawPeekI32(state.bytecode, offset + 5);
         final int tableIndex = rawPeekI32(state.bytecode, offset + 9);
-        final WasmTable table = state.instance.table(tableIndex);
-        final Object[] elements = table.elements();
-        final int elementIndex = popInt(frame, --virtualState.stackPointer);
-        if (elementIndex < 0 || elementIndex >= elements.length) {
-            enterErrorBranch(state.thiz.codeEntry);
-            throw WasmException.format(Failure.UNDEFINED_ELEMENT, state.thiz, "Element index '%d' out of table bounds.", elementIndex);
-        }
-        // Currently, table elements may only be functions.
-        // We can add a check here when this changes in the future.
-        final Object functionCandidate = elements[elementIndex];
-        if (!(functionCandidate instanceof WasmFunctionInstance functionInstance)) {
-            throw state.thiz.callIndirectNotAFunctionError(functionCandidate, elementIndex);
-        }
-        final WasmFunction function = functionInstance.function();
+        final WasmFunctionInstance functionInstance = state.thiz.loadIndirectCallFunctionInstance(frame, --virtualState.stackPointer, state.instance, tableIndex, expectedFunctionTypeIndex);
         final CallTarget target = functionInstance.target();
-        final WasmContext functionInstanceContext = functionInstance.context();
-        // Target function instance must be from the same context.
-        assert functionInstanceContext == WasmContext.get(state.thiz);
-        // Validate that the target function type matches the expected type of
-        // the indirect call.
-        if (!state.thiz.runTimeConcreteTypeCheck(expectedFunctionTypeIndex, functionInstance)) {
-            enterErrorBranch(state.thiz.codeEntry);
-            state.thiz.failFunctionTypeCheck(function, expectedFunctionTypeIndex);
-        }
         // Invoke the resolved function.
         int paramCount = state.module.symbolTable().functionTypeParamCount(expectedFunctionTypeIndex);
         Object[] args = state.thiz.createArgumentsForCall(frame, expectedFunctionTypeIndex, paramCount, virtualState.stackPointer);
@@ -1822,19 +1796,81 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
     }
 
     @EarlyInline
+    private static Object returnCallU8(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
+        final int functionIndex = rawPeekU8(state.bytecode, offset + 1);
+        final WasmFunction function = state.module.symbolTable().function(functionIndex);
+        final int paramCount = function.paramCount();
+        final Object[] args = state.thiz.createArgumentsForCall(frame, function.typeIndex(), paramCount, virtualState.stackPointer);
+        return state.thiz.executeDirectReturnCall(state.instance, function, args);
+    }
+
+    @EarlyInline
+    private static Object returnCallI32(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
+        final int functionIndex = rawPeekI32(state.bytecode, offset + 1);
+        final WasmFunction function = state.module.symbolTable().function(functionIndex);
+        final int paramCount = function.paramCount();
+        final Object[] args = state.thiz.createArgumentsForCall(frame, function.typeIndex(), paramCount, virtualState.stackPointer);
+        return state.thiz.executeDirectReturnCall(state.instance, function, args);
+    }
+
+    @EarlyInline
+    private static Object returnCallIndirectU8(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
+        final int expectedFunctionTypeIndex = rawPeekU8(state.bytecode, offset + 1);
+        final int tableIndex = rawPeekU8(state.bytecode, offset + 2);
+        final WasmFunctionInstance functionInstance = state.thiz.loadIndirectCallFunctionInstance(frame, --virtualState.stackPointer, state.instance, tableIndex, expectedFunctionTypeIndex);
+        final int paramCount = state.module.symbolTable().functionTypeParamCount(expectedFunctionTypeIndex);
+        final Object[] args = state.thiz.createArgumentsForCall(frame, expectedFunctionTypeIndex, paramCount, virtualState.stackPointer);
+        return state.thiz.executeIndirectReturnCall(functionInstance, args);
+    }
+
+    @EarlyInline
+    private static Object returnCallIndirectI32(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
+        final int expectedFunctionTypeIndex = rawPeekI32(state.bytecode, offset + 1);
+        final int tableIndex = rawPeekI32(state.bytecode, offset + 5);
+        final WasmFunctionInstance functionInstance = state.thiz.loadIndirectCallFunctionInstance(frame, --virtualState.stackPointer, state.instance, tableIndex, expectedFunctionTypeIndex);
+        final int paramCount = state.module.symbolTable().functionTypeParamCount(expectedFunctionTypeIndex);
+        final Object[] args = state.thiz.createArgumentsForCall(frame, expectedFunctionTypeIndex, paramCount, virtualState.stackPointer);
+        return state.thiz.executeIndirectReturnCall(functionInstance, args);
+    }
+
+    private WasmFunctionInstance loadRefCallFunctionInstance(VirtualFrame frame, int stackPointer) {
+        final Object functionCandidate = popReference(frame, stackPointer);
+        if (!(functionCandidate instanceof WasmFunctionInstance functionInstance)) {
+            throw callRefNotAFunctionError(functionCandidate);
+        }
+        // Target function instance must be from the same context.
+        assert functionInstance.context() == WasmContext.get(this);
+        return functionInstance;
+    }
+
+    @EarlyInline
+    private static Object returnCallRefU8(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
+        final int expectedFunctionTypeIndex = rawPeekU8(state.bytecode, offset + 1);
+        final WasmFunctionInstance functionInstance = state.thiz.loadRefCallFunctionInstance(frame, --virtualState.stackPointer);
+        // Invoke the resolved function.
+        final int paramCount = state.module.symbolTable().functionTypeParamCount(expectedFunctionTypeIndex);
+        final Object[] args = state.thiz.createArgumentsForCall(frame, expectedFunctionTypeIndex, paramCount, virtualState.stackPointer);
+        return state.thiz.executeIndirectReturnCall(functionInstance, args);
+    }
+
+    @EarlyInline
+    private static Object returnCallRefI32(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
+        final int expectedFunctionTypeIndex = rawPeekI32(state.bytecode, offset + 1);
+        final WasmFunctionInstance functionInstance = state.thiz.loadRefCallFunctionInstance(frame, --virtualState.stackPointer);
+        // Invoke the resolved function.
+        final int paramCount = state.module.symbolTable().functionTypeParamCount(expectedFunctionTypeIndex);
+        final Object[] args = state.thiz.createArgumentsForCall(frame, expectedFunctionTypeIndex, paramCount, virtualState.stackPointer);
+        return state.thiz.executeIndirectReturnCall(functionInstance, args);
+    }
+
+    @EarlyInline
     @SuppressWarnings("unused")
     @BytecodeInterpreterHandler(value = {Bytecode.CALL_REF_U8}, safepoint = false)
     private static int callRefU8Handler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
         final int callNodeIndex = rawPeekU8(state.bytecode, offset + 1);
         final int expectedFunctionTypeIndex = rawPeekU8(state.bytecode, offset + 2);
-        final Object functionCandidate = popReference(frame, --virtualState.stackPointer);
-        if (!(functionCandidate instanceof WasmFunctionInstance functionInstance)) {
-            throw state.thiz.callRefNotAFunctionError(functionCandidate);
-        }
+        final WasmFunctionInstance functionInstance = state.thiz.loadRefCallFunctionInstance(frame, --virtualState.stackPointer);
         final CallTarget target = functionInstance.target();
-        final WasmContext functionInstanceContext = functionInstance.context();
-        // Target function instance must be from the same context.
-        assert functionInstanceContext == WasmContext.get(state.thiz);
         // Invoke the resolved function.
         int paramCount = state.module.symbolTable().functionTypeParamCount(expectedFunctionTypeIndex);
         Object[] args = state.thiz.createArgumentsForCall(frame, expectedFunctionTypeIndex, paramCount, virtualState.stackPointer);
@@ -1852,14 +1888,8 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
     private static int callRefI32Handler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
         final int callNodeIndex = rawPeekI32(state.bytecode, offset + 1);
         final int expectedFunctionTypeIndex = rawPeekI32(state.bytecode, offset + 5);
-        final Object functionCandidate = popReference(frame, --virtualState.stackPointer);
-        if (!(functionCandidate instanceof WasmFunctionInstance functionInstance)) {
-            throw state.thiz.callRefNotAFunctionError(functionCandidate);
-        }
+        final WasmFunctionInstance functionInstance = state.thiz.loadRefCallFunctionInstance(frame, --virtualState.stackPointer);
         final CallTarget target = functionInstance.target();
-        final WasmContext functionInstanceContext = functionInstance.context();
-        // Target function instance must be from the same context.
-        assert functionInstanceContext == WasmContext.get(state.thiz);
         // Invoke the resolved function.
         int paramCount = state.module.symbolTable().functionTypeParamCount(expectedFunctionTypeIndex);
         Object[] args = state.thiz.createArgumentsForCall(frame, expectedFunctionTypeIndex, paramCount, virtualState.stackPointer);
@@ -1970,16 +2000,6 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
     private static int i32ConstI32Handler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
         final int value = rawPeekI32(state.bytecode, offset + 1);
         pushInt(frame, virtualState.stackPointer, value);
-        virtualState.stackPointer++;
-        return offset + 5;
-    }
-
-    @EarlyInline
-    @SuppressWarnings("unused")
-    @BytecodeInterpreterHandler(value = {Bytecode.LOCAL_GET_I32}, safepoint = false)
-    private static int localGetI32Handler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
-        final int index = rawPeekI32(state.bytecode, offset + 1);
-        local_get(frame, virtualState.stackPointer, index);
         virtualState.stackPointer++;
         return offset + 5;
     }
@@ -2519,32 +2539,12 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
 
     @EarlyInline
     @SuppressWarnings("unused")
-    @BytecodeInterpreterHandler(value = {Bytecode.LOCAL_GET_OBJ_I32}, safepoint = false)
-    private static int localGetObjI32Handler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
-        final int index = rawPeekI32(state.bytecode, offset + 1);
-        local_get_obj(frame, virtualState.stackPointer, index);
-        virtualState.stackPointer++;
-        return offset + 5;
-    }
-
-    @EarlyInline
-    @SuppressWarnings("unused")
     @BytecodeInterpreterHandler(value = {Bytecode.LOCAL_SET_U8}, safepoint = false)
     private static int localSetU8Handler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
         final int index = rawPeekU8(state.bytecode, offset + 1);
         virtualState.stackPointer--;
         local_set(frame, virtualState.stackPointer, index);
         return offset + 2;
-    }
-
-    @EarlyInline
-    @SuppressWarnings("unused")
-    @BytecodeInterpreterHandler(value = {Bytecode.LOCAL_SET_I32}, safepoint = false)
-    private static int localSetI32Handler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
-        final int index = rawPeekI32(state.bytecode, offset + 1);
-        virtualState.stackPointer--;
-        local_set(frame, virtualState.stackPointer, index);
-        return offset + 5;
     }
 
     @EarlyInline
@@ -2559,16 +2559,6 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
 
     @EarlyInline
     @SuppressWarnings("unused")
-    @BytecodeInterpreterHandler(value = {Bytecode.LOCAL_SET_OBJ_I32}, safepoint = false)
-    private static int localSetObjI32Handler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
-        final int index = rawPeekI32(state.bytecode, offset + 1);
-        virtualState.stackPointer--;
-        local_set_obj(frame, virtualState.stackPointer, index);
-        return offset + 5;
-    }
-
-    @EarlyInline
-    @SuppressWarnings("unused")
     @BytecodeInterpreterHandler(value = {Bytecode.LOCAL_TEE_U8}, safepoint = false)
     private static int localTeeU8Handler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
         final int index = rawPeekU8(state.bytecode, offset + 1);
@@ -2578,29 +2568,11 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
 
     @EarlyInline
     @SuppressWarnings("unused")
-    @BytecodeInterpreterHandler(value = {Bytecode.LOCAL_TEE_I32}, safepoint = false)
-    private static int localTeeI32Handler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
-        final int index = rawPeekI32(state.bytecode, offset + 1);
-        local_tee(frame, virtualState.stackPointer - 1, index);
-        return offset + 5;
-    }
-
-    @EarlyInline
-    @SuppressWarnings("unused")
     @BytecodeInterpreterHandler(value = {Bytecode.LOCAL_TEE_OBJ_U8}, safepoint = false)
     private static int localTeeObjU8Handler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
         final int index = rawPeekU8(state.bytecode, offset + 1);
         local_tee_obj(frame, virtualState.stackPointer - 1, index);
         return offset + 2;
-    }
-
-    @EarlyInline
-    @SuppressWarnings("unused")
-    @BytecodeInterpreterHandler(value = {Bytecode.LOCAL_TEE_OBJ_I32}, safepoint = false)
-    private static int localTeeObjI32Handler(int offset, State state, VirtualState virtualState, FrameWithoutBoxing frame) {
-        final int index = rawPeekI32(state.bytecode, offset + 1);
-        local_tee_obj(frame, virtualState.stackPointer - 1, index);
-        return offset + 5;
     }
 
     @EarlyInline
@@ -4639,6 +4611,66 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                 }
                 break;
             }
+            case Bytecode.LOCAL_GET_I32: {
+                final int index = rawPeekI32(state.bytecode, offset + 2);
+                local_get(frame, virtualState.stackPointer, index);
+                virtualState.stackPointer++;
+                nextOffset = offset + 6;
+                break;
+            }
+            case Bytecode.LOCAL_GET_OBJ_I32: {
+                final int index = rawPeekI32(state.bytecode, offset + 2);
+                local_get_obj(frame, virtualState.stackPointer, index);
+                virtualState.stackPointer++;
+                nextOffset = offset + 6;
+                break;
+            }
+            case Bytecode.LOCAL_SET_I32: {
+                final int index = rawPeekI32(state.bytecode, offset + 2);
+                virtualState.stackPointer--;
+                local_set(frame, virtualState.stackPointer, index);
+                nextOffset = offset + 6;
+                break;
+            }
+            case Bytecode.LOCAL_SET_OBJ_I32: {
+                final int index = rawPeekI32(state.bytecode, offset + 2);
+                virtualState.stackPointer--;
+                local_set_obj(frame, virtualState.stackPointer, index);
+                nextOffset = offset + 6;
+                break;
+            }
+            case Bytecode.LOCAL_TEE_I32: {
+                final int index = rawPeekI32(state.bytecode, offset + 2);
+                local_tee(frame, virtualState.stackPointer - 1, index);
+                nextOffset = offset + 6;
+                break;
+            }
+            case Bytecode.LOCAL_TEE_OBJ_I32: {
+                final int index = rawPeekI32(state.bytecode, offset + 2);
+                local_tee_obj(frame, virtualState.stackPointer - 1, index);
+                nextOffset = offset + 6;
+                break;
+            }
+            case Bytecode.BR_RETURN_CALL: {
+                final int paramCount = state.thiz.codeEntry.function().paramCount();
+                // move arguments to locals
+                unwindStack(frame, virtualState.stackPointer, 0, paramCount);
+                // clear the entire stack (including legacy catch slots), except for the parameters
+                dropStack(frame, virtualState.stackPointer, paramCount);
+                // reinitialize all remaining locals
+                WasmFrame.initializeLocals(frame, paramCount, state.thiz.codeEntry);
+
+                nextOffset = state.thiz.bytecodeStartOffset;
+                virtualState.stackPointer = state.stackBase;
+                // the active legacy catch count is always zero at the start of the function.
+                state.activeLegacyCatchCount = 0;
+                /*
+                 * As this return call forms a loop without explicit header,
+                 * we report the loop count here.
+                 */
+                updateBackEdgeCounterAndTryOSR(nextOffset, state, virtualState, frame);
+                break;
+            }
             default: {
                 nextOffset = state.thiz.executeMisc(state.instance, frame, offset + 2, virtualState.stackPointer, miscOpcode);
                 virtualState.stackPointer += StackEffects.getMiscOpStackEffect(miscOpcode);
@@ -4769,7 +4801,7 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
         } else {
             WasmDirectCallNode directCallNode = (WasmDirectCallNode) callNode;
             WasmArguments.setModuleInstance(args, instance);
-            result = directCallNode.execute(args);
+            result = directCallNode.execute(args, function.containsReturnCalls());
         }
         return pushDirectCallResult(frame, stackPointer, function, result, WasmLanguage.get(this));
     }
@@ -4793,6 +4825,31 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
     private Object executeIndirectCallNode(int callNodeIndex, CallTarget target, Object[] args) {
         WasmIndirectCallNode callNode = (WasmIndirectCallNode) callNodes[callNodeIndex];
         return callNode.execute(target, args);
+    }
+
+    private Object executeDirectReturnCall(WasmInstance instance, WasmFunction function, Object[] args) {
+        final boolean imported = function.isImported();
+        CompilerAsserts.partialEvaluationConstant(imported);
+        final WasmFunctionInstance functionInstance = instance.functionInstance(function.index());
+        final CallTarget target = instance.target(function.index());
+        if (imported) {
+            WasmArguments.setModuleInstance(args, functionInstance.moduleInstance());
+        } else {
+            WasmArguments.setModuleInstance(args, instance);
+        }
+        return executeReturnCall(target, args);
+    }
+
+    private Object executeIndirectReturnCall(WasmFunctionInstance functionInstance, Object[] args) {
+        WasmArguments.setModuleInstance(args, functionInstance.moduleInstance());
+        return executeReturnCall(functionInstance.target(), args);
+    }
+
+    private Object executeReturnCall(CallTarget target, Object[] args) {
+        final WasmLanguage.ReturnCallData data = WasmLanguage.get(this).returnCallData();
+        data.target = target;
+        data.args = args;
+        return WasmConstant.RETURN_CALL_VALUE;
     }
 
     /**
@@ -4990,6 +5047,10 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                 CompilerAsserts.partialEvaluationConstant(elemType);
 
                 int length = WasmFrame.popInt(frame, stackPointer - 1);
+                if (module.limits().exceedsArrayInstanceSizeLimit(length, elemType)) {
+                    enterErrorBranch(codeEntry);
+                    throw WasmException.create(Failure.ARRAY_LENGTH_LIMIT_EXCEEDED);
+                }
                 WasmArray array = switch (elemType) {
                     case WasmType.I8_TYPE -> {
                         byte initialValue = (byte) WasmFrame.popInt(frame, stackPointer - 2);
@@ -5037,6 +5098,10 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                 CompilerAsserts.partialEvaluationConstant(elemType);
 
                 int length = WasmFrame.popInt(frame, stackPointer - 1);
+                if (module.limits().exceedsArrayInstanceSizeLimit(length, elemType)) {
+                    enterErrorBranch(codeEntry);
+                    throw WasmException.create(Failure.ARRAY_LENGTH_LIMIT_EXCEEDED);
+                }
                 WasmArray array = switch (elemType) {
                     case WasmType.I8_TYPE -> new WasmInt8Array(arrayType, length);
                     case WasmType.I16_TYPE -> new WasmInt16Array(arrayType, length);
@@ -5063,9 +5128,13 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
 
                 int length = WasmFrame.popInt(frame, stackPointer - 1);
                 int source = WasmFrame.popInt(frame, stackPointer - 2);
-                if (checkOutOfBounds(source, length * WasmType.storageByteSize(elemType), dataLength)) {
+                if (checkOutOfBounds(source, (long) length * WasmType.storageByteSize(elemType), dataLength)) {
                     enterErrorBranch(codeEntry);
                     throw WasmException.create(Failure.OUT_OF_BOUNDS_MEMORY_ACCESS);
+                }
+                if (module.limits().exceedsArrayInstanceSizeLimit(length, elemType)) {
+                    enterErrorBranch(codeEntry);
+                    throw WasmException.create(Failure.ARRAY_LENGTH_LIMIT_EXCEEDED);
                 }
                 WasmArray array = switch (elemType) {
                     case WasmType.I8_TYPE -> new WasmInt8Array(arrayType, length, bytecode, dataOffset + source);
@@ -5094,6 +5163,10 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                 if (checkOutOfBounds(source, length, elemInstance == null ? 0 : elemInstance.length)) {
                     enterErrorBranch(codeEntry);
                     throw WasmException.create(Failure.OUT_OF_BOUNDS_TABLE_ACCESS);
+                }
+                if (module.limits().exceedsArrayInstanceSizeLimit(length, module.arrayTypeElemType(arrayTypeIdx))) {
+                    enterErrorBranch(codeEntry);
+                    throw WasmException.create(Failure.ARRAY_LENGTH_LIMIT_EXCEEDED);
                 }
                 WasmRefArray array = length == 0 ? new WasmRefArray(arrayType, 0) : new WasmRefArray(arrayType, length, elemInstance, source);
                 WasmFrame.pushReference(frame, stackPointer - 2, array);
@@ -5294,7 +5367,7 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                     enterErrorBranch(codeEntry);
                     throw WasmException.create(Failure.OUT_OF_BOUNDS_ARRAY_ACCESS);
                 }
-                if (checkOutOfBounds(source, length * WasmType.storageByteSize(elemType), dataLength)) {
+                if (checkOutOfBounds(source, (long) length * WasmType.storageByteSize(elemType), dataLength)) {
                     enterErrorBranch(codeEntry);
                     throw WasmException.create(Failure.OUT_OF_BOUNDS_MEMORY_ACCESS);
                 }
@@ -5398,7 +5471,7 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
             }
             case Bytecode.REF_I31: {
                 int i32 = WasmFrame.popInt(frame, stackPointer - 1);
-                Integer i31 = (i32 << 1) >> 1;
+                Integer i31 = WasmType.asSignedI31(i32);
                 WasmFrame.pushReference(frame, stackPointer - 1, i31);
                 break;
             }
@@ -5411,7 +5484,7 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                 }
                 int i32 = (int) i31;
                 if (aggregateOpcode == Bytecode.I31_GET_U) {
-                    i32 &= ~(1 << 31);
+                    i32 = WasmType.asUnsignedI31(i32);
                 }
                 WasmFrame.pushInt(frame, stackPointer - 1, i32);
                 break;
@@ -5454,6 +5527,20 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
             case Bytecode.I64_TRUNC_SAT_F64_U:
                 i64_trunc_sat_f64_u(frame, stackPointer);
                 break;
+            case Bytecode.I64_ADD128:
+                i64_add128(frame, stackPointer);
+                stackPointer -= 2;
+                break;
+            case Bytecode.I64_SUB128:
+                i64_sub128(frame, stackPointer);
+                stackPointer -= 2;
+                break;
+            case Bytecode.I64_MUL_WIDE_S:
+                i64_mul_wide_s(frame, stackPointer);
+                break;
+            case Bytecode.I64_MUL_WIDE_U:
+                i64_mul_wide_u(frame, stackPointer);
+                break;
             case Bytecode.MEMORY_INIT:
             case Bytecode.MEMORY64_INIT: {
                 final int dataIndex = rawPeekI32(bytecode, offset);
@@ -5494,7 +5581,7 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
 
                 final int n = popInt(frame, stackPointer - 1);
                 final int src = popInt(frame, stackPointer - 2);
-                final int dst = popInt(frame, stackPointer - 3);
+                final long dst = popTableIndex(frame, stackPointer - 3, instance.table(tableIndex));
                 table_init(instance, n, src, dst, tableIndex, elementIndex);
                 stackPointer -= 3;
                 offset += 8;
@@ -5510,9 +5597,11 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                 final int srcIndex = rawPeekI32(bytecode, offset);
                 final int dstIndex = rawPeekI32(bytecode, offset + 4);
 
-                final int n = popInt(frame, stackPointer - 1);
-                final int src = popInt(frame, stackPointer - 2);
-                final int dst = popInt(frame, stackPointer - 3);
+                final WasmTable sourceTable = instance.table(srcIndex);
+                final WasmTable destinationTable = instance.table(dstIndex);
+                final long n = popTableCopyLength(frame, stackPointer - 1, sourceTable, destinationTable);
+                final long src = popTableIndex(frame, stackPointer - 2, sourceTable);
+                final long dst = popTableIndex(frame, stackPointer - 3, destinationTable);
                 table_copy(instance, n, src, dst, srcIndex, dstIndex);
                 stackPointer -= 3;
                 offset += 8;
@@ -5521,11 +5610,12 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
             case Bytecode.TABLE_GROW: {
                 final int tableIndex = rawPeekI32(bytecode, offset);
 
-                final int n = popInt(frame, stackPointer - 1);
+                final WasmTable table = instance.table(tableIndex);
+                final long n = popTableIndex(frame, stackPointer - 1, table);
                 final Object val = popReference(frame, stackPointer - 2);
 
-                final int res = table_grow(instance, n, val, tableIndex);
-                pushInt(frame, stackPointer - 2, res);
+                final long res = table_grow(instance, n, val, tableIndex);
+                pushTableIndex(frame, stackPointer - 2, table, res);
                 stackPointer--;
                 offset += 4;
                 break;
@@ -5540,9 +5630,10 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
             case Bytecode.TABLE_FILL: {
                 final int tableIndex = rawPeekI32(bytecode, offset);
 
-                final int n = popInt(frame, stackPointer - 1);
+                final WasmTable table = instance.table(tableIndex);
+                final long n = popTableIndex(frame, stackPointer - 1, table);
                 final Object val = popReference(frame, stackPointer - 2);
-                final int i = popInt(frame, stackPointer - 3);
+                final long i = popTableIndex(frame, stackPointer - 3, table);
                 table_fill(instance, n, val, i, tableIndex);
                 stackPointer -= 3;
                 offset += 4;
@@ -7838,8 +7929,50 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
         pushLong(frame, stackPointer - 1, result);
     }
 
+    private static void i64_add128(VirtualFrame frame, int stackPointer) {
+        long rhsHigh = popLong(frame, stackPointer - 1);
+        long rhsLow = popLong(frame, stackPointer - 2);
+        long lhsHigh = popLong(frame, stackPointer - 3);
+        long lhsLow = popLong(frame, stackPointer - 4);
+        long resultLow = lhsLow + rhsLow;
+        long carry = Long.compareUnsigned(resultLow, lhsLow) < 0 ? 1 : 0;
+        long resultHigh = lhsHigh + rhsHigh + carry;
+        pushLong(frame, stackPointer - 4, resultLow);
+        pushLong(frame, stackPointer - 3, resultHigh);
+    }
+
+    private static void i64_sub128(VirtualFrame frame, int stackPointer) {
+        long rhsHigh = popLong(frame, stackPointer - 1);
+        long rhsLow = popLong(frame, stackPointer - 2);
+        long lhsHigh = popLong(frame, stackPointer - 3);
+        long lhsLow = popLong(frame, stackPointer - 4);
+        long resultLow = lhsLow - rhsLow;
+        long borrow = Long.compareUnsigned(lhsLow, rhsLow) < 0 ? 1 : 0;
+        long resultHigh = lhsHigh - rhsHigh - borrow;
+        pushLong(frame, stackPointer - 4, resultLow);
+        pushLong(frame, stackPointer - 3, resultHigh);
+    }
+
+    private static void i64_mul_wide_s(VirtualFrame frame, int stackPointer) {
+        long rhs = popLong(frame, stackPointer - 1);
+        long lhs = popLong(frame, stackPointer - 2);
+        long resultLow = lhs * rhs;
+        long resultHigh = ExactMath.multiplyHigh(lhs, rhs);
+        pushLong(frame, stackPointer - 2, resultLow);
+        pushLong(frame, stackPointer - 1, resultHigh);
+    }
+
+    private static void i64_mul_wide_u(VirtualFrame frame, int stackPointer) {
+        long rhs = popLong(frame, stackPointer - 1);
+        long lhs = popLong(frame, stackPointer - 2);
+        long resultLow = lhs * rhs;
+        long resultHigh = ExactMath.multiplyHighUnsigned(lhs, rhs);
+        pushLong(frame, stackPointer - 2, resultLow);
+        pushLong(frame, stackPointer - 1, resultHigh);
+    }
+
     @TruffleBoundary
-    private void table_init(WasmInstance instance, int length, int source, int destination, int tableIndex, int elementIndex) {
+    private void table_init(WasmInstance instance, int length, int source, long destination, int tableIndex, int elementIndex) {
         final WasmTable table = instance.table(tableIndex);
         final Object[] elementInstance = instance.elemInstance(elementIndex);
         final int elementInstanceLength;
@@ -7855,44 +7988,44 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
         if (length == 0) {
             return;
         }
-        table.initialize(elementInstance, source, destination, length);
+        table.initialize(elementInstance, source, (int) destination, length);
     }
 
     private void table_get(WasmInstance instance, VirtualFrame frame, int stackPointer, int tableIndex) {
         final WasmTable table = instance.table(tableIndex);
-        final int i = popInt(frame, stackPointer - 1);
-        if (i < 0 || i >= table.size()) {
+        final long i = popTableIndex(frame, stackPointer - 1, table);
+        if (checkOutOfBounds(i, table.size())) {
             enterErrorBranch(codeEntry);
             throw WasmException.create(Failure.OUT_OF_BOUNDS_TABLE_ACCESS);
         }
-        final Object value = table.get(i);
+        final Object value = table.get((int) i);
         pushReference(frame, stackPointer - 1, value);
     }
 
     private void table_set(WasmInstance instance, VirtualFrame frame, int stackPointer, int tableIndex) {
         final WasmTable table = instance.table(tableIndex);
         final Object value = popReference(frame, stackPointer - 1);
-        final int i = popInt(frame, stackPointer - 2);
-        if (i < 0 || i >= table.size()) {
+        final long i = popTableIndex(frame, stackPointer - 2, table);
+        if (checkOutOfBounds(i, table.size())) {
             enterErrorBranch(codeEntry);
             throw WasmException.create(Failure.OUT_OF_BOUNDS_TABLE_ACCESS);
         }
-        table.set(i, value);
+        table.set((int) i, value);
     }
 
     private static void table_size(WasmInstance instance, VirtualFrame frame, int stackPointer, int tableIndex) {
         final WasmTable table = instance.table(tableIndex);
-        pushInt(frame, stackPointer, table.size());
+        pushTableIndex(frame, stackPointer, table, table.size());
     }
 
     @TruffleBoundary
-    private static int table_grow(WasmInstance instance, int length, Object value, int tableIndex) {
+    private static long table_grow(WasmInstance instance, long length, Object value, int tableIndex) {
         final WasmTable table = instance.table(tableIndex);
         return table.grow(length, value);
     }
 
     @TruffleBoundary
-    private void table_copy(WasmInstance instance, int length, int source, int destination, int sourceTableIndex, int destinationTableIndex) {
+    private void table_copy(WasmInstance instance, long length, long source, long destination, int sourceTableIndex, int destinationTableIndex) {
         final WasmTable sourceTable = instance.table(sourceTableIndex);
         final WasmTable destinationTable = instance.table(destinationTableIndex);
         if (checkOutOfBounds(source, length, sourceTable.size()) || checkOutOfBounds(destination, length, destinationTable.size())) {
@@ -7902,11 +8035,11 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
         if (length == 0) {
             return;
         }
-        destinationTable.copyFrom(sourceTable, source, destination, length);
+        destinationTable.copyFrom(sourceTable, (int) source, (int) destination, (int) length);
     }
 
     @TruffleBoundary
-    private void table_fill(WasmInstance instance, int length, Object value, int offset, int tableIndex) {
+    private void table_fill(WasmInstance instance, long length, Object value, long offset, int tableIndex) {
         final WasmTable table = instance.table(tableIndex);
         if (checkOutOfBounds(offset, length, table.size())) {
             enterErrorBranch(codeEntry);
@@ -7915,7 +8048,7 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
         if (length == 0) {
             return;
         }
-        table.fill(offset, length, value);
+        table.fill((int) offset, (int) length, value);
     }
 
     @TruffleBoundary
@@ -7949,13 +8082,42 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
         memoryLib(destMemoryIndex).copyFrom(destMemory, this, srcMemory, source, destination, length);
     }
 
+    private static long popTableIndex(VirtualFrame frame, int stackPointer, WasmTable table) {
+        return table.hasIndexType64() ? popLong(frame, stackPointer) : Integer.toUnsignedLong(popInt(frame, stackPointer));
+    }
+
+    private static long popTableCopyLength(VirtualFrame frame, int stackPointer, WasmTable sourceTable, WasmTable destinationTable) {
+        return sourceTable.hasIndexType64() && destinationTable.hasIndexType64() ? popLong(frame, stackPointer) : Integer.toUnsignedLong(popInt(frame, stackPointer));
+    }
+
+    private static void pushTableIndex(VirtualFrame frame, int stackPointer, WasmTable table, long value) {
+        if (table.hasIndexType64()) {
+            pushLong(frame, stackPointer, value);
+        } else {
+            pushInt(frame, stackPointer, (int) value);
+        }
+    }
+
     // Checkstyle: resume method name check
 
     private static boolean checkOutOfBounds(int offset, int size) {
         return offset < 0 || offset >= size;
     }
 
+    private static boolean checkOutOfBounds(long offset, int size) {
+        return Long.compareUnsigned(offset, Integer.toUnsignedLong(size)) >= 0;
+    }
+
     private static boolean checkOutOfBounds(int offset, int length, int size) {
+        return offset < 0 || length < 0 || offset + length < 0 || offset + length > size;
+    }
+
+    private static boolean checkOutOfBounds(long offset, long length, int size) {
+        return Long.compareUnsigned(offset, Integer.toUnsignedLong(size)) > 0 ||
+                        Long.compareUnsigned(length, Integer.toUnsignedLong(size) - offset) > 0;
+    }
+
+    private static boolean checkOutOfBounds(int offset, long length, int size) {
         return offset < 0 || length < 0 || offset + length < 0 || offset + length > size;
     }
 
@@ -7990,19 +8152,19 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
     }
 
     private int exceptionHandlerTo(int handlerOffset) {
-        return rawPeekI32(bytecode, handlerOffset + EXCEPTION_HANDLER_TO_OFFSET);
+        return rawPeekI32(bytecode, handlerOffset + ExceptionHandler.TO_OFFSET);
     }
 
     private int exceptionHandlerType(int handlerOffset) {
-        return rawPeekU8(bytecode, handlerOffset + EXCEPTION_HANDLER_TYPE_OFFSET);
+        return rawPeekU8(bytecode, handlerOffset + ExceptionHandler.TYPE_OFFSET);
     }
 
     private int exceptionHandlerTagIndex(int handlerOffset) {
-        return rawPeekI32(bytecode, handlerOffset + EXCEPTION_HANDLER_TAG_OFFSET);
+        return rawPeekI32(bytecode, handlerOffset + ExceptionHandler.TAG_OFFSET);
     }
 
     private int exceptionHandlerTarget(int handlerOffset) {
-        return rawPeekI32(bytecode, handlerOffset + EXCEPTION_HANDLER_TARGET_OFFSET);
+        return rawPeekI32(bytecode, handlerOffset + ExceptionHandler.TARGET_OFFSET);
     }
 
     private static boolean isLegacyCatchType(int catchType) {
@@ -8034,7 +8196,7 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
     }
 
     private static int nextExceptionHandlerOffset(int handlerOffset) {
-        return handlerOffset + EXCEPTION_HANDLER_SIZE;
+        return handlerOffset + ExceptionHandler.SIZE;
     }
 
     /**
@@ -8168,7 +8330,7 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                 for (int i = length - 1; i >= 0; i--) {
                     vector128Ops().intoArray(WasmFrame.popVector128(frame, --stackPointer), fixedArray, i << 4);
                 }
-                return new WasmVec128Array(arrayType, fixedArray);
+                return new WasmVec128Array(arrayType, length, fixedArray);
             }
             default: {
                 Object[] fixedArray = new Object[length];
@@ -8506,6 +8668,56 @@ public final class WasmFunctionNode<V128> extends Node implements BytecodeOSRNod
                     assert WasmType.isReferenceType(resultType);
                     pushReference(frame, stackPointer + i, objectMultiValueStack[i]);
                     objectMultiValueStack[i] = null;
+                }
+            }
+        }
+    }
+
+    private Object extractResultValue(VirtualFrame frame, int stackPointer) {
+        final WasmCodeEntry entry = codeEntry;
+        final int resultCount = entry.resultCount();
+        CompilerAsserts.partialEvaluationConstant(resultCount);
+        if (resultCount == 0) {
+            return WasmConstant.VOID;
+        } else if (resultCount == 1) {
+            final int resultType = entry.resultType(0);
+            final int stackBase = stackPointer - 1;
+            CompilerAsserts.partialEvaluationConstant(resultType);
+            return switch (resultType) {
+                case WasmType.I32_TYPE -> popInt(frame, stackBase);
+                case WasmType.I64_TYPE -> popLong(frame, stackBase);
+                case WasmType.F32_TYPE -> popFloat(frame, stackBase);
+                case WasmType.F64_TYPE -> popDouble(frame, stackBase);
+                case WasmType.V128_TYPE -> Vector128Ops.SINGLETON_IMPLEMENTATION.toVector128(popVector128(frame, stackBase));
+                default -> {
+                    assert WasmType.isReferenceType(resultType);
+                    yield popReference(frame, stackPointer - 1);
+                }
+            };
+        } else {
+            moveResultValuesToMultiValueStack(frame, stackPointer, resultCount, entry);
+            return WasmConstant.MULTI_VALUE;
+        }
+    }
+
+    @ExplodeLoop
+    private void moveResultValuesToMultiValueStack(VirtualFrame frame, int stackPointer, int resultCount, WasmCodeEntry entry) {
+        final var multiValueStack = WasmLanguage.get(this).multiValueStack();
+        final long[] primitiveMultiValueStack = multiValueStack.primitiveStack();
+        final Object[] objectMultiValueStack = multiValueStack.objectStack();
+        final int stackBase = stackPointer - resultCount;
+        for (int i = 0; i < resultCount; i++) {
+            final int resultType = entry.resultType(i);
+            CompilerAsserts.partialEvaluationConstant(resultType);
+            switch (resultType) {
+                case WasmType.I32_TYPE -> primitiveMultiValueStack[i] = popInt(frame, stackBase + i);
+                case WasmType.I64_TYPE -> primitiveMultiValueStack[i] = popLong(frame, stackBase + i);
+                case WasmType.F32_TYPE -> primitiveMultiValueStack[i] = Float.floatToRawIntBits(popFloat(frame, stackBase + i));
+                case WasmType.F64_TYPE -> primitiveMultiValueStack[i] = Double.doubleToRawLongBits(popDouble(frame, stackBase + i));
+                case WasmType.V128_TYPE -> objectMultiValueStack[i] = Vector128Ops.SINGLETON_IMPLEMENTATION.toVector128(popVector128(frame, stackBase + i));
+                default -> {
+                    assert WasmType.isReferenceType(resultType);
+                    objectMultiValueStack[i] = popReference(frame, stackBase + i);
                 }
             }
         }

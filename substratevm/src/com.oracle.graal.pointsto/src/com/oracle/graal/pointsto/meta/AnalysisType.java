@@ -59,6 +59,7 @@ import com.oracle.graal.pointsto.util.AtomicUtils;
 import com.oracle.graal.pointsto.util.ConcurrentLightHashMap;
 import com.oracle.graal.pointsto.util.ConcurrentLightHashSet;
 import com.oracle.svm.shared.util.LogUtils;
+import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.OriginalClassProvider;
 import com.oracle.svm.util.OriginalMethodProvider;
 
@@ -242,6 +243,9 @@ public abstract class AnalysisType extends AnalysisElement implements WrappedJav
     public AnalysisType(AnalysisUniverse universe, ResolvedJavaType javaType, JavaKind storageKind, AnalysisType objectType, AnalysisType cloneableType) {
         super(universe.hostVM.enableTrackAcrossLayers());
         this.universe = universe;
+        ResolvedJavaType originalType = OriginalClassProvider.getOriginalType(javaType);
+        AnalysisError.guarantee(originalType == null || originalType instanceof BaseLayerType || GuestAccess.get().owns(originalType),
+                        "Analysis type is not owned by the guest context: %s", javaType);
         this.wrapped = javaType;
         qualifiedName = wrapped.toJavaName(true);
         unqualifiedName = wrapped.toJavaName(false);
@@ -680,7 +684,7 @@ public abstract class AnalysisType extends AnalysisElement implements WrappedJav
         ConcurrentLightHashSet.addElement(this, subtypeReachableNotificationsUpdater, notification);
     }
 
-    public <T> void registerObjectReachableCallback(ObjectReachableCallback<T> callback) {
+    public void registerObjectReachableCallback(JVMCIObjectReachableCallback callback) {
         ConcurrentLightHashSet.addElement(this, objectReachableCallbacksUpdater, callback);
         /* Register the callback with already discovered subtypes too. */
         ConcurrentLightHashSet.forEach(this, SUBTYPES_UPDATER, (AnalysisType subType) -> {
@@ -691,9 +695,9 @@ public abstract class AnalysisType extends AnalysisElement implements WrappedJav
         });
     }
 
-    public <T> void notifyObjectReachable(T object, ScanReason reason) {
+    public void notifyObjectReachable(JavaConstant object, ScanReason reason) {
         ConcurrentLightHashSet.forEach(this, objectReachableCallbacksUpdater,
-                        (ObjectReachableCallback<T> c) -> c.doCallback(universe.getConcurrentAnalysisAccess(), object, reason));
+                        (JVMCIObjectReachableCallback c) -> c.doCallback(universe.getConcurrentAnalysisAccess(), object, reason));
     }
 
     /**
@@ -1160,7 +1164,7 @@ public abstract class AnalysisType extends AnalysisElement implements WrappedJav
         /* Register the object reachability callbacks with the newly discovered subtype. */
         if (!subType.equals(this)) {
             /* Subtypes include this type itself. */
-            ConcurrentLightHashSet.forEach(this, objectReachableCallbacksUpdater, (ObjectReachableCallback<Object> callback) -> subType.registerObjectReachableCallback(callback));
+            ConcurrentLightHashSet.forEach(this, objectReachableCallbacksUpdater, (JVMCIObjectReachableCallback callback) -> subType.registerObjectReachableCallback(callback));
         }
         assert result : "Tried to add a " + subType + " which is already registered";
     }

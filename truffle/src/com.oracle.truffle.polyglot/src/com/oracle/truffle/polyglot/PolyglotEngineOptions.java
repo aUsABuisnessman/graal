@@ -135,13 +135,21 @@ final class PolyglotEngineOptions {
                     "Warn that the virtual thread support is experimental (default: true).", usageSyntax = "true|false", sandbox = SandboxPolicy.UNTRUSTED)//
     static final OptionKey<Boolean> WarnVirtualThreadSupport = new OptionKey<>(true);
 
+    @Option(category = OptionCategory.USER, stability = OptionStability.STABLE, help = "" +
+                    "Warn when an isolated context uses host access without host method scoping (default: true).", usageSyntax = "true|false", sandbox = SandboxPolicy.UNTRUSTED)//
+    static final OptionKey<Boolean> WarnMethodScoping = new OptionKey<>(true);
+
     @Option(category = OptionCategory.INTERNAL, stability = OptionStability.EXPERIMENTAL, help = "" +
                     "Use pre-initialized context when it's available (default: true).", usageSyntax = "true|false")//
     static final OptionKey<Boolean> UsePreInitializedContext = new OptionKey<>(true);
 
     @Option(category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, help = "" +
-                    "On property accesses, the Static Object Model does not perform shape checks and uses unsafe casts")//
+                    "On property accesses, the Static Object Model does not perform shape checks and uses unsafe casts", usageSyntax = "true|false")//
     static final OptionKey<Boolean> RelaxStaticObjectSafetyChecks = new OptionKey<>(false);
+
+    @Option(category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, sandbox = SandboxPolicy.UNTRUSTED, help = "" +
+                    "On property accesses, the Static Object Model always performs safety checks, overriding engine.RelaxStaticObjectSafetyChecks and builder-level safety check configuration.", usageSyntax = "true|false")//
+    static final OptionKey<Boolean> ForceStaticObjectSafetyChecks = new OptionKey<>(false);
 
     @Option(category = OptionCategory.INTERNAL, stability = OptionStability.EXPERIMENTAL, help = "" +
                     "Option to force enable code sharing for this engine, even if the context was created with a bound engine. This option is intended for testing purposes only.")//
@@ -289,7 +297,7 @@ final class PolyglotEngineOptions {
                     "This is a hard limit for the size of the isolate heap including both guest applications retained data and data allocated by the runtime.", usageSyntax = "[32MB, inf)<B>|<KB>|<MB>|<GB>", sandbox = SandboxPolicy.UNTRUSTED)//
     static final OptionKey<Long> MaxIsolateMemory = new OptionKey<>(-1L, createSizeInBytesType("engine.MaxIsolateMemory", 32 * SizeUnit.MEGABYTE.factor));
 
-    @Option(category = OptionCategory.USER, stability = OptionStability.EXPERIMENTAL, help = "Defines how an isolated heap is implemented for isolated engines. " +
+    @Option(category = OptionCategory.USER, stability = OptionStability.STABLE, help = "Defines how an isolated heap is implemented for isolated engines. " +
                     "'internal' runs the isolate within the current VM, using native-image isolation, 'external' runs the isolate in a separate external process.", usageSyntax = "internal|external", sandbox = SandboxPolicy.UNTRUSTED)//
     static final OptionKey<IsolatePolicy> IsolateMode = new OptionKey<>(IsolatePolicy.INTERNAL);
 

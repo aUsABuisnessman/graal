@@ -211,17 +211,6 @@ public abstract sealed class AbstractTruffleString permits TruffleString, Mutabl
     }
 
     /**
-     * Returns {@code true} if this string is compatible to the given encoding.
-     *
-     * @since 22.1
-     * @deprecated use {@link #isCompatibleToUncached(Encoding)} instead.
-     */
-    @Deprecated(since = "23.0")
-    public final boolean isCompatibleTo(TruffleString.Encoding expectedEncoding) {
-        return isCompatibleToUncached(expectedEncoding);
-    }
-
-    /**
      * Returns {@code true} if this string is compatible to the given encoding. Compatible for
      * {@link TruffleString} means it is byte-equivalent in both the encoding used to create this
      * string and the given encoding. For {@link MutableTruffleString} this method only returned
@@ -820,6 +809,16 @@ public abstract sealed class AbstractTruffleString permits TruffleString, Mutabl
     /**
      * Shorthand for calling the uncached version of {@link TruffleString.CodePointAtIndexNode}.
      *
+     * @since 25.1
+     */
+    @TruffleBoundary
+    public final int codePointAtIndexUTF32Uncached(int i) {
+        return TruffleString.CodePointAtIndexUTF32Node.getUncached().execute(this, i);
+    }
+
+    /**
+     * Shorthand for calling the uncached version of {@link TruffleString.CodePointAtIndexNode}.
+     *
      * @since 22.3
      */
     @TruffleBoundary
@@ -948,6 +947,16 @@ public abstract sealed class AbstractTruffleString permits TruffleString, Mutabl
     @TruffleBoundary
     public final int byteIndexOfStringUncached(TruffleString.WithMask b, int fromIndex, int toIndex, TruffleString.Encoding expectedEncoding) {
         return TruffleString.ByteIndexOfStringNode.getUncached().execute(this, b.string, fromIndex, toIndex, b.mask, expectedEncoding);
+    }
+
+    /**
+     * Shorthand for calling the uncached version of {@link TruffleString.ByteIndexOfStringSetNode}.
+     *
+     * @since 25.1
+     */
+    @TruffleBoundary
+    public final long byteIndexOfStringSetUncached(int fromByteIndex, int toByteIndex, TruffleString.StringSet stringSet) {
+        return TruffleString.ByteIndexOfStringSetNode.getUncached().execute(this, fromByteIndex, toByteIndex, stringSet);
     }
 
     /**
@@ -1176,39 +1185,11 @@ public abstract sealed class AbstractTruffleString permits TruffleString, Mutabl
     /**
      * Shorthand for calling the uncached version of {@link TruffleString.CopyToByteArrayNode}.
      *
-     * @deprecated since 22.3, use {@link #copyToByteArrayUncached(int, byte[], int, int, Encoding)}
-     *             instead.
-     *
-     * @since 22.1
-     */
-    @Deprecated(since = "22.3")
-    @TruffleBoundary
-    public final void copyToByteArrayNodeUncached(int byteFromIndexA, byte[] dst, int byteFromIndexDst, int byteLength, TruffleString.Encoding expectedEncoding) {
-        copyToByteArrayUncached(byteFromIndexA, dst, byteFromIndexDst, byteLength, expectedEncoding);
-    }
-
-    /**
-     * Shorthand for calling the uncached version of {@link TruffleString.CopyToByteArrayNode}.
-     *
      * @since 22.1
      */
     @TruffleBoundary
     public final void copyToByteArrayUncached(int byteFromIndexA, byte[] dst, int byteFromIndexDst, int byteLength, TruffleString.Encoding expectedEncoding) {
         TruffleString.CopyToByteArrayNode.getUncached().execute(this, byteFromIndexA, dst, byteFromIndexDst, byteLength, expectedEncoding);
-    }
-
-    /**
-     * Shorthand for calling the uncached version of {@link TruffleString.CopyToNativeMemoryNode}.
-     *
-     * @deprecated since 22.3, use
-     *             {@link #copyToNativeMemoryUncached(int, Object, int, int, Encoding)} instead.
-     *
-     * @since 22.1
-     */
-    @Deprecated(since = "22.3")
-    @TruffleBoundary
-    public final void copyToNativeMemoryNodeUncached(int byteFromIndexA, Object pointerObject, int byteFromIndexDst, int byteLength, TruffleString.Encoding expectedEncoding) {
-        copyToNativeMemoryUncached(byteFromIndexA, pointerObject, byteFromIndexDst, byteLength, expectedEncoding);
     }
 
     /**

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,13 +26,22 @@ package jdk.graal.compiler.core.phases;
 
 import jdk.graal.compiler.core.common.GraalOptions;
 import jdk.graal.compiler.core.common.SpectrePHTMitigations;
+import jdk.graal.compiler.duplication.phases.DeDuplicationPhase;
+import jdk.graal.compiler.duplication.phases.PullThroughPhiPhase;
+import jdk.graal.compiler.guards.GuardRangeGroupingPhase;
 import jdk.graal.compiler.loop.phases.LoopFullUnrollPhase;
+import jdk.graal.compiler.loop.phases.OptimizeLoopAccessesPhase;
 import jdk.graal.compiler.loop.phases.LoopPartialUnrollPhase;
 import jdk.graal.compiler.loop.phases.LoopPredicationPhase;
 import jdk.graal.compiler.loop.phases.LoopSafepointEliminationPhase;
 import jdk.graal.compiler.loop.phases.SpeculativeGuardMovementPhase;
+import jdk.graal.compiler.guards.optimistic.memory.OptimisticAliasingAnalysisPhase;
+import jdk.graal.compiler.guards.optimistic.memory.OptimisticGuardsPhase;
 import jdk.graal.compiler.nodes.loop.DefaultLoopPolicies;
 import jdk.graal.compiler.nodes.loop.LoopPolicies;
+import jdk.graal.compiler.options.Option;
+import jdk.graal.compiler.options.OptionKey;
+import jdk.graal.compiler.options.OptionType;
 import jdk.graal.compiler.options.OptionValues;
 import jdk.graal.compiler.phases.common.CanonicalizerPhase;
 import jdk.graal.compiler.phases.common.DeoptimizationGroupingPhase;
@@ -41,6 +50,7 @@ import jdk.graal.compiler.phases.common.FrameStateAssignmentPhase;
 import jdk.graal.compiler.phases.common.GuardLoweringPhase;
 import jdk.graal.compiler.phases.common.InsertGuardFencesPhase;
 import jdk.graal.compiler.phases.common.IterativeConditionalEliminationPhase;
+import jdk.graal.compiler.phases.common.LateLockEliminationPhase;
 import jdk.graal.compiler.phases.common.LockEliminationPhase;
 import jdk.graal.compiler.phases.common.LoopSafepointInsertionPhase;
 import jdk.graal.compiler.phases.common.MidTierLoweringPhase;
@@ -50,8 +60,34 @@ import jdk.graal.compiler.phases.common.RemoveValueProxyPhase;
 import jdk.graal.compiler.phases.common.VerifyHeapAtReturnPhase;
 import jdk.graal.compiler.phases.common.WriteBarrierAdditionPhase;
 import jdk.graal.compiler.phases.tiers.MidTierContext;
+import jdk.graal.compiler.vector.phases.ConditionalMoveOptimizationPhase;
+import jdk.graal.compiler.vector.phases.LoopVectorizationPhase;
+import jdk.graal.compiler.vector.phases.NodeVectorizationPhase;
+import jdk.graal.compiler.vector.phases.OptimizeAddressesInLoopsPhase;
+import jdk.graal.compiler.vector.phases.RemoveEmptyLoopsPhase;
+import jdk.graal.compiler.vector.phases.VectorMaterializationPhaseSuite;
+import jdk.graal.compiler.vector.replacements.VectorIntrinsics;
 
 public class MidTier extends BaseTier<MidTierContext> {
+
+    public static class Options {
+
+        //@formatter:off
+        @Option(help = "Performs aliasing analysis on arrays to determine which memory " +
+                       "does not alias and enables more optimizations to be performed.", type = OptionType.Expert)
+        public static final OptionKey<Boolean> OptimisticAliasingAnalysis = new OptionKey<>(true);
+
+        /// Controls whether integer range guards with the same anchor are combined.
+        @Option(help = "Combines integer range guards that have the same anchor.", type = OptionType.Debug)
+        public static final OptionKey<Boolean> OptGuardRangeGrouping = new OptionKey<>(true);
+
+        /// Controls whether eligible loop reads are replaced with loop-carried value phis.
+        @Option(help = "Enables access node optimizations for loops. " +
+                       "This can reduce the number of memory operations executed in the body of a loop.", type = OptionType.Expert)
+        public static final OptionKey<Boolean> OptimizeLoopAccesses = new OptionKey<>(true);
+
+        //@formatter:on
+    }
 
     @SuppressWarnings("this-escape")
     public MidTier(OptionValues options) {
@@ -71,7 +107,16 @@ public class MidTier extends BaseTier<MidTierContext> {
             appendPhase(new LoopPredicationPhase(canonicalizer));
         }
 
+        if (Options.OptimizeLoopAccesses.getValue(options)) {
+            // Expose value phis before later loop optimizations inspect induction variables.
+            appendPhase(new OptimizeLoopAccessesPhase());
+        }
+
         appendPhase(new LoopSafepointEliminationPhase());
+
+        if (Options.OptGuardRangeGrouping.getValue(options)) {
+            appendPhase(new GuardRangeGroupingPhase());
+        }
 
         if (GraalOptions.SpeculativeGuardMovement.getValue(options)) {
             appendPhase(new SpeculativeGuardMovementPhase(canonicalizer));
@@ -106,7 +151,36 @@ public class MidTier extends BaseTier<MidTierContext> {
             appendPhase(new OptimizeDivPhase(canonicalizer));
         }
 
+        if (VectorIntrinsics.Options.Vectorization.getValue(options) && Options.OptimisticAliasingAnalysis.getValue(options)) {
+            appendPhase(new OptimizeAddressesInLoopsPhase());
+            appendPhase(new OptimisticAliasingAnalysisPhase(canonicalizer));
+        }
+
         appendPhase(new FrameStateAssignmentPhase());
+
+        if (DeDuplicationPhase.Options.OptDeDuplication.getValue(options)) {
+            appendPhase(new DeDuplicationPhase(canonicalizer));
+        }
+
+        // Frame states enable nested elimination and lock coarsening across control flow.
+        appendPhase(new LateLockEliminationPhase());
+
+        if (PullThroughPhiPhase.Options.OptPullThroughPhi.getValue(options)) {
+            appendPhase(new PullThroughPhiPhase(canonicalizer));
+        }
+
+        if (VectorIntrinsics.Options.Vectorization.getValue(options)) {
+            appendPhase(new NodeVectorizationPhase(canonicalizer));
+            if (ConditionalMoveOptimizationPhase.Options.OptConditionalMoves.getValue(options)) {
+                appendPhase(new ConditionalMoveOptimizationPhase(canonicalizer));
+            }
+            if (LoopVectorizationPhase.Options.VectorizeLoops.getValue(options)) {
+                appendPhase(new LoopVectorizationPhase(LoopVectorizationPhase.Options.VectorizeDeopts.getValue(options), Options.OptimisticAliasingAnalysis.getValue(options), canonicalizer));
+            }
+            appendPhase(new RemoveEmptyLoopsPhase(canonicalizer));
+            appendPhase(new VectorMaterializationPhaseSuite(canonicalizer));
+            appendPhase(new OptimisticGuardsPhase(canonicalizer));
+        }
 
         if (GraalOptions.PartialUnroll.getValue(options)) {
             LoopPolicies loopPolicies = createLoopPolicies(options);

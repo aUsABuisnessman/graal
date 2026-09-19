@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2021, 2026, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2021, 2021, Red Hat Inc. All rights reserved.
  * Copyright (c) 2025, 2025, IBM Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
@@ -26,7 +26,7 @@
  */
 package com.oracle.svm.core.jfr.logging;
 
-import static com.oracle.svm.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
+import static com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
 
 import java.util.Locale;
 import java.util.Set;
@@ -35,8 +35,8 @@ import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 
 import com.oracle.svm.shared.util.SubstrateUtil;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.shared.util.ReflectionUtil;
 
 import jdk.jfr.internal.LogLevel;
@@ -63,26 +63,29 @@ public class JfrLogging {
 
     @RestrictHeapAccess(access = NO_ALLOCATION, reason = "May be used during OOME emergency dump.")
     public void logJfrSystemError(String message) {
-        int tagSetId = SubstrateUtil.cast(LogTag.JFR_SYSTEM, Target_jdk_jfr_internal_LogTag.class).id;
-        log(tagSetId, JfrLogConfiguration.JfrLogLevel.ERROR.level, message);
+        logIfEnabled(LogTag.JFR_SYSTEM, JfrLogConfiguration.JfrLogLevel.ERROR.level, message);
     }
 
     @RestrictHeapAccess(access = NO_ALLOCATION, reason = "May be used during OOME emergency dump.")
     public void logJfrInfo(String message) {
-        int tagSetId = SubstrateUtil.cast(LogTag.JFR, Target_jdk_jfr_internal_LogTag.class).id;
-        log(tagSetId, JfrLogConfiguration.JfrLogLevel.INFO.level, message);
+        logIfEnabled(LogTag.JFR, JfrLogConfiguration.JfrLogLevel.INFO.level, message);
     }
 
     @RestrictHeapAccess(access = NO_ALLOCATION, reason = "May be used during OOME emergency dump.")
     public void logJfrWarning(String message) {
-        int tagSetId = SubstrateUtil.cast(LogTag.JFR, Target_jdk_jfr_internal_LogTag.class).id;
-        log(tagSetId, JfrLogConfiguration.JfrLogLevel.WARNING.level, message);
+        logIfEnabled(LogTag.JFR, JfrLogConfiguration.JfrLogLevel.WARNING.level, message);
     }
 
     @RestrictHeapAccess(access = NO_ALLOCATION, reason = "May be used during OOME emergency dump.")
     public void logJfrSettingWarning(String message) {
-        int tagSetId = SubstrateUtil.cast(LogTag.JFR_SETTING, Target_jdk_jfr_internal_LogTag.class).id;
-        log(tagSetId, JfrLogConfiguration.JfrLogLevel.WARNING.level, message);
+        logIfEnabled(LogTag.JFR_SETTING, JfrLogConfiguration.JfrLogLevel.WARNING.level, message);
+    }
+
+    private void logIfEnabled(LogTag logTag, int level, String message) {
+        Target_jdk_jfr_internal_LogTag targetLogTag = SubstrateUtil.cast(logTag, Target_jdk_jfr_internal_LogTag.class);
+        if (level >= targetLogTag.tagSetLevel) {
+            log(targetLogTag.id, level, message);
+        }
     }
 
     @RestrictHeapAccess(access = NO_ALLOCATION, reason = "May be used during OOME emergency dump.")

@@ -996,11 +996,12 @@ final class PolyglotContextImpl implements com.oracle.truffle.polyglot.PolyglotI
                                  */
                                 setCachedThreadInfo(PolyglotThreadInfo.NULL);
                             }
-                            boolean transitionToMultiThreading = isSingleThreaded() && hasActiveOtherThread(true, false);
+                            Thread activeOtherThread = isSingleThreaded() ? getFirstActiveOtherThread(true, false) : null;
+                            boolean transitionToMultiThreading = activeOtherThread != null;
 
                             if (transitionToMultiThreading) {
                                 // recheck all thread accesses
-                                checkAllThreadAccesses(Thread.currentThread(), false);
+                                checkAllThreadAccesses(Thread.currentThread(), false, activeOtherThread);
                             }
 
                             if (transitionToMultiThreading) {
@@ -1214,10 +1215,10 @@ final class PolyglotContextImpl implements com.oracle.truffle.polyglot.PolyglotI
 
     synchronized void checkMultiThreadedAccess(Thread newThread) throws PolyglotThreadAccessException {
         boolean singleThread = singleThreaded ? !isActiveNotCancelled() : false;
-        checkAllThreadAccesses(newThread, singleThread);
+        checkAllThreadAccesses(newThread, singleThread, null);
     }
 
-    private void checkAllThreadAccesses(Thread enteringThread, boolean singleThread) throws PolyglotThreadAccessException {
+    private void checkAllThreadAccesses(Thread enteringThread, boolean singleThread, Thread activeOtherThread) throws PolyglotThreadAccessException {
         assert Thread.holdsLock(this);
         List<PolyglotLanguage> deniedLanguages = null;
         for (PolyglotLanguageContext context : contexts) {
@@ -1244,7 +1245,7 @@ final class PolyglotContextImpl implements com.oracle.truffle.polyglot.PolyglotI
             }
         }
         if (deniedLanguages != null) {
-            throw throwDeniedThreadAccess(enteringThread, singleThread, deniedLanguages);
+            throw throwDeniedThreadAccess(enteringThread, singleThread, deniedLanguages, activeOtherThread);
         }
     }
 
@@ -1589,14 +1590,15 @@ final class PolyglotContextImpl implements com.oracle.truffle.polyglot.PolyglotI
         }
 
         if (deniedLanguages != null) {
-            throw throwDeniedThreadAccess(current, singleThread, deniedLanguages);
+            throw throwDeniedThreadAccess(current, singleThread, deniedLanguages, null);
         }
         singleThreadValue.update(threadInfo);
 
         return threadInfo;
     }
 
-    static RuntimeException throwDeniedThreadAccess(Thread current, boolean accessSingleThreaded, List<PolyglotLanguage> deniedLanguages) throws PolyglotThreadAccessException {
+    static RuntimeException throwDeniedThreadAccess(Thread current, boolean accessSingleThreaded, List<PolyglotLanguage> deniedLanguages, Thread activeOtherThread)
+                    throws PolyglotThreadAccessException {
         String message;
         StringBuilder languagesString = new StringBuilder("");
         for (PolyglotLanguage language : deniedLanguages) {
@@ -1609,6 +1611,9 @@ final class PolyglotContextImpl implements com.oracle.truffle.polyglot.PolyglotI
             message = String.format("Single threaded access requested by thread %s but is not allowed for language(s) %s.", current, languagesString);
         } else {
             message = String.format("Multi threaded access requested by thread %s but is not allowed for language(s) %s.", current, languagesString);
+            if (activeOtherThread != null) {
+                message += String.format(" Thread %s was already active.", activeOtherThread);
+            }
         }
         throw new PolyglotThreadAccessException(message);
     }
@@ -2439,17 +2444,22 @@ final class PolyglotContextImpl implements com.oracle.truffle.polyglot.PolyglotI
     }
 
     boolean hasActiveOtherThread(boolean includePolyglotThreads, boolean includeLeaveAndEnterThreads) {
+        return getFirstActiveOtherThread(includePolyglotThreads, includeLeaveAndEnterThreads) != null;
+    }
+
+    private Thread getFirstActiveOtherThread(boolean includePolyglotThreads, boolean includeLeaveAndEnterThreads) {
         assert Thread.holdsLock(this);
         // send enters and leaves into a lock by setting the lastThread to null.
         for (PolyglotThreadInfo otherInfo : threads.values()) {
             if (!includePolyglotThreads && otherInfo.isPolyglotThread()) {
                 continue;
             }
-            if (!otherInfo.isCurrent() && (otherInfo.isActive() || (includeLeaveAndEnterThreads && otherInfo.isInLeaveAndEnter()))) {
-                return true;
+            Thread otherThread = otherInfo.getThread();
+            if (otherThread != null && otherThread != Thread.currentThread() && (otherInfo.isActive() || (includeLeaveAndEnterThreads && otherInfo.isInLeaveAndEnter()))) {
+                return otherThread;
             }
         }
-        return false;
+        return null;
     }
 
     boolean hasAliveOtherPolyglotThread() {
@@ -2817,7 +2827,7 @@ final class PolyglotContextImpl implements com.oracle.truffle.polyglot.PolyglotI
                         assert cachedThreadInfo == PolyglotThreadInfo.NULL;
                         /*
                          * When cancelling or exiting, we have to wait for all other threads to
-                         * complete - even for the the default close, otherwise the default close
+                         * complete - even for the default close, otherwise the default close
                          * executed prematurely as the result of leaving the context on the main
                          * thread due to cancel exception could fail because of other threads still
                          * being active. The correct behavior is that the normal close finishes
@@ -4030,6 +4040,57 @@ final class PolyglotContextImpl implements com.oracle.truffle.polyglot.PolyglotI
             closeables = Collections.newSetFromMap(new WeakHashMap<>());
         }
         closeables.add(Objects.requireNonNull(closeable));
+    }
+
+    String toEmbedderString(int identityHash, String isolate) {
+        StringBuilder b = new StringBuilder("Context[id=");
+        b.append(Integer.toHexString(identityHash));
+        b.append(", isolate=");
+        b.append(isolate);
+        b.append(", state=");
+        State localState = state;
+        b.append(localState == State.DEFAULT ? "OPEN" : localState.name());
+        if (!localState.isClosed()) {
+            b.append(", ");
+            if (isActive()) {
+                b.append("active");
+            } else {
+                b.append("inactive");
+            }
+        }
+        b.append(", ");
+        if (singleThreaded) {
+            b.append("single-threaded");
+        } else {
+            b.append("multi-threaded");
+        }
+        b.append(", sharingPolicy=");
+        b.append(layer.isClaimed() ? layer.getContextPolicy() : "UNCLAIMED");
+        b.append(", initializedLanguages=[");
+        String sep = "";
+        for (PolyglotLanguageContext languageContext : contexts) {
+            if (languageContext.isInitialized()) {
+                b.append(sep);
+                b.append(languageContext.language.getId());
+                sep = ", ";
+            }
+        }
+        b.append("]");
+        if (!localState.isClosed()) {
+            b.append(", options={");
+            String separator = PolyglotEngineImpl.appendSetOptions(b, engine.engineOptionValues, "");
+            for (PolyglotLanguage language : engine.idToLanguage.values()) {
+                if (language.getOptionValuesIfExists() != null) {
+                    separator = PolyglotEngineImpl.appendSetOptions(b, config.getLanguageOptionValues(language), separator);
+                }
+            }
+            for (PolyglotInstrument instrument : engine.idToInstrument.values()) {
+                separator = PolyglotEngineImpl.appendSetOptions(b, config.getInstrumentOptionValuesIfExists(instrument), separator);
+            }
+            b.append('}');
+        }
+        b.append(']');
+        return b.toString();
     }
 
     @Override

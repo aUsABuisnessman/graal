@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -40,19 +40,19 @@ import org.graalvm.nativeimage.hosted.Feature.FeatureAccess;
 import com.oracle.graal.pointsto.ObjectScanner.OtherReason;
 import com.oracle.graal.pointsto.ObjectScanner.ScanReason;
 import com.oracle.graal.pointsto.meta.AnalysisUniverse;
-import com.oracle.svm.core.BuildPhaseProvider.AfterAnalysis;
+import com.oracle.svm.shared.BuildPhaseProvider.AfterAnalysis;
 import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.graal.code.SubstrateBackend;
 import com.oracle.svm.core.graal.code.SubstrateBackendFactory;
 import com.oracle.svm.core.graal.meta.RuntimeConfiguration;
 import com.oracle.svm.core.graal.meta.SharedRuntimeMethod;
-import com.oracle.svm.core.heap.UnknownObjectField;
-import com.oracle.svm.core.heap.UnknownPrimitiveField;
-import com.oracle.svm.core.option.RuntimeOptionValues;
+import com.oracle.svm.guest.staging.core.heap.UnknownObjectField;
+import com.oracle.svm.guest.staging.core.heap.UnknownPrimitiveField;
+import com.oracle.svm.guest.staging.option.RuntimeOptionValues;
 import com.oracle.svm.graal.meta.SubstrateMethod;
 import com.oracle.svm.hosted.FeatureImpl.DuringAnalysisAccessImpl;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.Disallowed;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.DisallowLayered;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 
@@ -84,7 +84,7 @@ import jdk.vm.ci.meta.ResolvedJavaMethod;
  * Holds data that is pre-computed during native image generation and accessed at run time during a
  * multi-tier based runtime compilation system.
  */
-@SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
+@SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, other = DisallowLayered.class)
 public class RuntimeCompilationSupport {
 
     private static final ScanReason scanReason = new OtherReason("Manual rescan of Graal objects triggered from " + RuntimeCompilationSupport.class);
@@ -309,7 +309,7 @@ public class RuntimeCompilationSupport {
                         .build();
         PEGraphDecoder decoder = new PEGraphDecoder(SubstrateTarget.getArchitecture(), graph, get().runtimeConfig.getProviders(),
                         null, get().invocationPlugins, new InlineInvokePlugin[0], null, null,
-                        null, null, new ConcurrentHashMap<>(), new ConcurrentHashMap<>(), true, false) {
+                        null, new ConcurrentHashMap<>(), new ConcurrentHashMap<>(), true, false) {
             @Override
             protected EncodedGraph lookupEncodedGraph(ResolvedJavaMethod lookupMethod, BytecodeProvider intrinsicBytecodeProvider) {
                 GraalError.guarantee(method.equals(lookupMethod), lookupMethod.getName());

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -38,12 +38,15 @@ import org.graalvm.word.WordBase;
 
 import com.oracle.graal.pointsto.constraints.UnsupportedFeatureException;
 import com.oracle.graal.pointsto.heap.HeapSnapshotVerifier;
+import com.oracle.graal.pointsto.heap.HostedValuesProvider;
 import com.oracle.graal.pointsto.heap.ImageHeapArray;
 import com.oracle.graal.pointsto.heap.ImageHeapConstant;
 import com.oracle.graal.pointsto.heap.ImageHeapScanner;
+import com.oracle.graal.pointsto.heap.TypedConstant;
 import com.oracle.graal.pointsto.meta.AnalysisField;
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.AnalysisType;
+import com.oracle.graal.pointsto.reports.ObjectTreePrinter;
 import com.oracle.graal.pointsto.reports.ReportUtils;
 import com.oracle.graal.pointsto.util.AnalysisError;
 import com.oracle.graal.pointsto.util.CompletionExecutor;
@@ -52,17 +55,22 @@ import com.oracle.svm.util.GuestAccess;
 import jdk.graal.compiler.graph.NodeSourcePosition;
 import jdk.vm.ci.code.BytecodePosition;
 import jdk.vm.ci.meta.Constant;
-import jdk.vm.ci.meta.ConstantReflectionProvider;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
+import jdk.vm.ci.meta.ResolvedJavaType;
 
 /**
- * Provides functionality for scanning constant objects.
- *
+ * Provides functionality for traversing object graphs from a set of roots.
+ * For every encountered field value and array element, the scanner delegates to an
+ * {@link ObjectScanningObserver}. The observer determines the purpose and effects of a traversal;
+ * for example, {@link AnalysisObjectScanningObserver} drives analysis,
+ * {@link HeapSnapshotVerifier} verifies the image-heap snapshot, and {@link ObjectTreePrinter}
+ * produces diagnostics.
+ * <p>
  * The scanning is done in parallel. The set of visited elements is a special data structure whose
- * structure can be reused over multiple scanning iterations to save CPU resources. (For details
+ * structure can be reused over multiple scanning iterations to save CPU resources (For details, see
  * {@link ReusableSet}).
  */
 public class ObjectScanner {
@@ -272,15 +280,15 @@ public class ObjectScanner {
                 }
             }
         } else {
-            ConstantReflectionProvider constantReflection = GuestAccess.get().getProviders().getConstantReflection();
-            int len = constantReflection.readArrayLength(array);
+            HostedValuesProvider hostedValuesProvider = bb.getUniverse().getHostedValuesProvider();
+            int len = hostedValuesProvider.readArrayLength(array);
             for (int idx = 0; idx < len; idx++) {
-                JavaConstant elem = constantReflection.readArrayElement(array, idx);
+                JavaConstant elem = hostedValuesProvider.readArrayElement(array, idx);
                 if (elem.isNull()) {
                     scanningObserver.forNullArrayElement(array, arrayType, idx, reason);
                 } else {
                     try {
-                        JavaConstant element = bb.getUniverse().replaceConstantWithConstant(elem, (JavaConstant constant) -> constantAsObject(bb, constant));
+                        JavaConstant element = bb.getUniverse().replaceConstantWithAllReplacers(elem);
                         scanArrayElement(array, arrayType, reason, idx, element);
                     } catch (UnsupportedFeatureException | AnalysisError.TypeNotFoundError ex) {
                         unsupportedFeatureDuringConstantScan(bb, elem, ex, reason);
@@ -399,7 +407,7 @@ public class ObjectScanner {
         if (constant == null || constant.isNull()) {
             return "null";
         }
-        AnalysisType type = bb.getMetaAccess().lookupJavaType(constant);
+        ResolvedJavaType type = constant instanceof TypedConstant typedConstant ? typedConstant.getType() : bb.getMetaAccess().getWrapped().lookupJavaType(constant);
         JavaConstant hosted = constant;
         if (constant instanceof ImageHeapConstant heapConstant) {
             JavaConstant hostedObject = heapConstant.getHostedObject();
@@ -415,17 +423,31 @@ public class ObjectScanner {
             return hosted.toValueString();
         }
 
-        Object obj = constantAsObject(bb, hosted);
-        String str = type.toJavaName() + '@' + Integer.toHexString(System.identityHashCode(obj));
+        /*
+         * The scan fast path only needs reachability. Guest-backed identityHashCode/toString are
+         * used exclusively for optional diagnostics such as reports and verifier messages, so this
+         * generic GuestAccess fallback stays off the main scanning path.
+         */
+        String str = type.toJavaName() + '@' + Integer.toHexString(originalIdentityHashCode(hosted));
         if (appendToString) {
             try {
-                str += ": " + limit(obj.toString(), 80).replace(System.lineSeparator(), "");
-            } catch (Throwable e) {
+                str += ": " + limit(originalToString(hosted), 80).replace(System.lineSeparator(), "");
+            } catch (Throwable ignored) {
                 // ignore any error in creating the string representation
             }
         }
 
         return str;
+    }
+
+    private static int originalIdentityHashCode(JavaConstant constant) {
+        return GuestAccess.get().getProviders().getConstantReflection().identityHashCode(constant);
+    }
+
+    private static String originalToString(JavaConstant constant) {
+        GuestAccess access = GuestAccess.get();
+        JavaConstant stringConstant = access.invoke(access.elements.java_lang_Object_toString, constant);
+        return access.asHostString(stringConstant);
     }
 
     public static String limit(String value, int length) {

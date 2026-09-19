@@ -231,6 +231,9 @@ public abstract class InterpreterResolvedJavaType extends InterpreterAnnotated i
     @Override
     public abstract InterpreterResolvedJavaMethod[] getDeclaredMethods(boolean forceLink);
 
+    @Override
+    public abstract InterpreterResolvedJavaMethod[] getDeclaredConstructors(boolean forceLink);
+
     /**
      * Resolves the target using the same metadata shape that interpreter dispatch uses.
      */
@@ -348,9 +351,7 @@ public abstract class InterpreterResolvedJavaType extends InterpreterAnnotated i
     }
 
     @Override
-    public final ResolvedJavaType getSingleImplementor() {
-        throw VMError.intentionallyUnimplemented();
-    }
+    public abstract ResolvedJavaType getSingleImplementor();
 
     @Override
     public final ResolvedJavaType findLeastCommonAncestor(ResolvedJavaType otherType) {
@@ -358,33 +359,7 @@ public abstract class InterpreterResolvedJavaType extends InterpreterAnnotated i
     }
 
     @Override
-    public final Assumptions.AssumptionResult<ResolvedJavaType> findLeafConcreteSubtype() {
-        if (isLeaf()) {
-            // No assumptions are required.
-            return new Assumptions.AssumptionResult<>(this);
-        }
-
-        if (isArray()) {
-            ResolvedJavaType elementalType = getElementalType();
-            Assumptions.AssumptionResult<ResolvedJavaType> elementType = elementalType.findLeafConcreteSubtype();
-            if (elementType != null && elementType.getResult().equals(elementalType)) {
-                /*
-                 * If the elementType is leaf then the array is leaf under the same assumptions but
-                 * only if the element type is exactly the leaf type. The element type can be
-                 * abstract even if there is only one implementor of the abstract type.
-                 */
-                Assumptions.AssumptionResult<ResolvedJavaType> result = new Assumptions.AssumptionResult<>(this);
-                result.add(elementType);
-                return result;
-            }
-            return null;
-        } else {
-            /*
-             * TODO GR-72446 - add single implementor class hierarchy analysis to ristretto
-             */
-            return null;
-        }
-    }
+    public abstract Assumptions.AssumptionResult<ResolvedJavaType> findLeafConcreteSubtype();
 
     @Override
     public final ResolvedJavaType resolve(ResolvedJavaType accessingClass) {
@@ -400,9 +375,7 @@ public abstract class InterpreterResolvedJavaType extends InterpreterAnnotated i
     }
 
     @Override
-    public final Assumptions.AssumptionResult<ResolvedJavaMethod> findUniqueConcreteMethod(ResolvedJavaMethod method) {
-        throw VMError.intentionallyUnimplemented();
-    }
+    public abstract Assumptions.AssumptionResult<ResolvedJavaMethod> findUniqueConcreteMethod(ResolvedJavaMethod method);
 
     @Override
     public ResolvedJavaType lookupType(UnresolvedJavaType unresolvedJavaType, boolean resolve) {
@@ -437,7 +410,7 @@ public abstract class InterpreterResolvedJavaType extends InterpreterAnnotated i
 
     @Override
     public InterpreterResolvedJavaMethod[] getDeclaredConstructors() {
-        throw VMError.intentionallyUnimplemented();
+        return getDeclaredConstructors(true);
     }
 
     @Override
